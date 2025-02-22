@@ -60,9 +60,9 @@ type ValidatorService struct {
 
 // Start starts the validator service. This will fetch the current range of blocks to validate and start the validation
 // process.
-func (a *ValidatorService) Start(ctx context.Context) error {
+func (v *ValidatorService) Start(ctx context.Context) error {
 	header, err := retry.Do(ctx, retryAttempts, retry.Exponential(), func() (*api.Response[*v1.BeaconBlockHeader], error) {
-		return a.headerClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
+		return v.headerClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
 			Block: "head",
 		})
 	})
@@ -72,27 +72,27 @@ func (a *ValidatorService) Start(ctx context.Context) error {
 	}
 
 	end := header.Data.Header.Message.Slot - finalizedL1Offset
-	start := end - phase0.Slot(a.cfg.NumBlocks)
+	start := end - phase0.Slot(v.cfg.NumBlocks)
 
-	go a.checkBlobs(ctx, start, end)
+	go v.checkBlobs(ctx, start, end)
 
 	return nil
 }
 
 // Stops the validator service.
-func (a *ValidatorService) Stop(ctx context.Context) error {
-	if a.stopped.Load() {
+func (v *ValidatorService) Stop(ctx context.Context) error {
+	if v.stopped.Load() {
 		return ErrAlreadyStopped
 	}
 
-	a.log.Info("Stopping validator")
-	a.stopped.Store(true)
+	v.log.Info("Stopping validator")
+	v.stopped.Store(true)
 
 	return nil
 }
 
-func (a *ValidatorService) Stopped() bool {
-	return a.stopped.Load()
+func (v *ValidatorService) Stopped() bool {
+	return v.stopped.Load()
 }
 
 // CheckBlobResult contains the summary of the blob checks
@@ -130,18 +130,18 @@ func fetchWithRetries(ctx context.Context, endpoint BlobSidecarClient, id string
 
 // checkBlobs iterates all blocks in the range start:end and checks that the blobs from the beacon-node and blob-api
 // are identical, when encoded in both JSON and SSZ.
-func (a *ValidatorService) checkBlobs(ctx context.Context, start phase0.Slot, end phase0.Slot) CheckBlobResult {
+func (v *ValidatorService) checkBlobs(ctx context.Context, start phase0.Slot, end phase0.Slot) CheckBlobResult {
 	var result CheckBlobResult
 
 	for slot := start; slot <= end; slot++ {
-		for _, setting := range a.cfg.ValidateFormats {
+		for _, setting := range v.cfg.ValidateFormats {
 			format := formatSettingToHeader[setting]
 
 			id := strconv.FormatUint(uint64(slot), 10)
 
-			l := a.log.New("format", format, "slot", slot)
+			l := v.log.New("format", format, "slot", slot)
 
-			blobStatus, blobResponse, blobError := fetchWithRetries(ctx, a.blobAPI, id, format)
+			blobStatus, blobResponse, blobError := fetchWithRetries(ctx, v.blobAPI, id, format)
 
 			if blobError != nil {
 				result.ErrorFetching = append(result.ErrorFetching, id)
@@ -149,7 +149,7 @@ func (a *ValidatorService) checkBlobs(ctx context.Context, start phase0.Slot, en
 				continue
 			}
 
-			beaconStatus, beaconResponse, beaconErr := fetchWithRetries(ctx, a.beaconAPI, id, format)
+			beaconStatus, beaconResponse, beaconErr := fetchWithRetries(ctx, v.beaconAPI, id, format)
 
 			if beaconErr != nil {
 				result.ErrorFetching = append(result.ErrorFetching, id)
@@ -188,7 +188,7 @@ func (a *ValidatorService) checkBlobs(ctx context.Context, start phase0.Slot, en
 	}
 
 	// Validation is complete, shutdown the app
-	a.closeApp(nil)
+	v.closeApp(nil)
 
 	return result
 }
