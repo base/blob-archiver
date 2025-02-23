@@ -89,7 +89,7 @@ func TestBrokenStorage(t *testing.T) {
 
 	exists, err := fs.Exists(context.Background(), id)
 	require.False(t, exists)
-	require.NoError(t, err) // No error should be returned, as in this test we've just delted the directory
+	require.NoError(t, err) // No error should be returned, as in this test we've just deleted the directory
 
 	err = fs.WriteBlob(context.Background(), BlobData{
 		Header: Header{
