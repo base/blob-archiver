@@ -58,7 +58,7 @@ type Archiver struct {
 // filled in.
 func (a *Archiver) Start(ctx context.Context) error {
 	currentBlock, _, err := retry.Do2(ctx, startupFetchBlobMaximumRetries, retry.Exponential(), func() (*v1.BeaconBlockHeader, bool, error) {
-		return a.persistBlobsForBlockToS3(ctx, "head", false)
+		return a.persistBlobsForBlock(ctx, "head", false)
 	})
 
 	if err != nil {
@@ -79,12 +79,12 @@ func (a *Archiver) Stop(ctx context.Context) error {
 	return nil
 }
 
-// persistBlobsForBlockToS3 fetches the blobs for a given block and persists them to S3. It returns the block header
+// persistBlobsForBlock fetches the blobs for a given block and persists them to S3. It returns the block header
 // and a boolean indicating whether the blobs already existed in S3 and any errors that occur.
 // If the blobs are already stored, it will not overwrite the data. Currently, the archiver does not
 // perform any validation of the blobs, it assumes a trusted beacon node. See:
 // https://github.com/base/blob-archiver/issues/4.
-func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier string, overwrite bool) (*v1.BeaconBlockHeader, bool, error) {
+func (a *Archiver) persistBlobsForBlock(ctx context.Context, blockIdentifier string, overwrite bool) (*v1.BeaconBlockHeader, bool, error) {
 	currentHeader, err := a.beaconClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
 		Block: blockIdentifier,
 	})
@@ -230,7 +230,7 @@ func (a *Archiver) backfillBlobs(ctx context.Context, latest *v1.BeaconBlockHead
 				return
 			}
 
-			curr, alreadyExists, err = a.persistBlobsForBlockToS3(ctx, previous.Header.Message.ParentRoot.String(), false)
+			curr, alreadyExists, err = a.persistBlobsForBlock(ctx, previous.Header.Message.ParentRoot.String(), false)
 			if err != nil {
 				a.log.Error("failed to persist blobs for block, will retry", "err", err, "hash", previous.Header.Message.ParentRoot.String())
 				// Revert back to block we failed to fetch
@@ -284,7 +284,7 @@ func (a *Archiver) processBlocksUntilKnownBlock(ctx context.Context) {
 
 	for {
 		current, alreadyExisted, err := retry.Do2(ctx, liveFetchBlobMaximumRetries, retry.Exponential(), func() (*v1.BeaconBlockHeader, bool, error) {
-			return a.persistBlobsForBlockToS3(ctx, currentBlockId, false)
+			return a.persistBlobsForBlock(ctx, currentBlockId, false)
 		})
 
 		if err != nil {
@@ -321,7 +321,7 @@ func (a *Archiver) rearchiveRange(from uint64, to uint64) (uint64, uint64, error
 		l.Info("rearchiving block")
 
 		rewritten, err := retry.Do(context.Background(), rearchiveMaximumRetries, retry.Exponential(), func() (bool, error) {
-			_, _, e := a.persistBlobsForBlockToS3(context.Background(), id, true)
+			_, _, e := a.persistBlobsForBlock(context.Background(), id, true)
 
 			// If the block is not found, we can assume that the slot has been skipped
 			if e != nil {
