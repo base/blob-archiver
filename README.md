@@ -1,3 +1,5 @@
+[![](https://github.com/base/blob-archiver/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/base/blob-archiver/actions/workflows/github-code-scanning/codeql)
+
 # Blob Archiver
 The Blob Archiver is a service to archive and allow querying of all historical blobs from the beacon chain. It consists 
 of two components:
