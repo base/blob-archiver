@@ -12,14 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// BLS12-381 field modulus (as a big-endian byte array)
-// This is the prime field modulus used by BLS12-381
-// In decimal: 52435875175126190479447740508185965837690552500527637822603658699938581184513
-var fieldModulus = [32]byte{
-	0x73, 0xed, 0xa7, 0x53, 0x29, 0xd7, 0xd4, 0x69, 0x5e, 0x7f, 0x6e, 0x0f, 0xf9, 0xd7, 0xfb, 0xd8,
-	0xc4, 0xb9, 0x35, 0x6d, 0x47, 0x19, 0xb7, 0x01, 0x8b, 0x0c, 0x6c, 0x6f, 0xd9, 0x52, 0x53, 0x73,
-}
-
 var (
 	OriginBlock = common.Hash{9, 9, 9, 9, 9}
 	One         = common.Hash{1}
@@ -50,8 +42,9 @@ func NewBlobSidecars(t *testing.T, count uint, signedHeader *phase0.SignedBeacon
 	kzgCtx, err := gokzg4844.NewContext4096Secure()
 	require.NoError(t, err)
 
-	// BLS12-381 field modulus as a big.Int
-	fieldModulusBig := new(big.Int).SetBytes(fieldModulus[:])
+	// Use the BLS12-381 scalar field modulus from go-kzg-4844
+	// This is the order of the G1/G2 subgroups, used to validate blob field elements
+	fieldModulusBig := new(big.Int).SetBytes(gokzg4844.BlsModulus[:])
 
 	// Use provided header or create empty one
 	if signedHeader == nil {
