@@ -125,8 +125,9 @@ func (a *Archiver) Stop(ctx context.Context) error {
 // perform any validation of the blobs, it assumes a trusted beacon node. See:
 // https://github.com/base/blob-archiver/issues/4.
 //
-// The function prefers the /eth/v1/beacon/blobs endpoint but falls back to /eth/v1/beacon/blob_sidecars
-// if the blobs endpoint fails.
+// The function prefers the /eth/v1/beacon/blob_sidecars endpoint but falls back to /eth/v1/beacon/blobs
+// if the blob sidecars endpoint fails. This avoids recomputing KZG commitments and proofs when they're
+// available from the beacon node.
 func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier string, overwrite bool) (*v1.BeaconBlockHeader, bool, error) {
 	currentHeader, err := a.beaconClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
 		Block: blockIdentifier,
@@ -148,38 +149,44 @@ func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier
 		return currentHeader.Data, true, nil
 	}
 
-	// Try the new blobs endpoint first
+	// Try the blob sidecars endpoint first to get commitments and proofs directly
 	var blobSidecarData []*deneb.BlobSidecar
-	blobs, err := a.beaconClient.Blobs(ctx, &api.BlobsOpts{
+	blobSidecarsResp, err := a.beaconClient.BlobSidecars(ctx, &api.BlobSidecarsOpts{
 		Block: currentHeader.Data.Root.String(),
 	})
 
-	if err == nil && blobs != nil && blobs.Data != nil && len(blobs.Data) > 0 {
-		// Successfully fetched blobs, compute commitments and proofs from blob data
-		a.log.Debug("fetched blobs from blobs endpoint, computing KZG commitments and proofs", "count", len(blobs.Data))
-
-		var err error
-		blobSidecarData, err = blobsToSidecars(blobs.Data, currentHeader.Data)
-		if err != nil {
-			a.log.Error("failed to compute KZG commitments and proofs for blobs", "err", err)
-			return nil, false, err
-		}
+	if err == nil && blobSidecarsResp != nil && blobSidecarsResp.Data != nil {
+		// Successfully fetched blob sidecars with KZG commitments and proofs
+		a.log.Debug("fetched blob sidecars from blob_sidecars endpoint", "count", len(blobSidecarsResp.Data))
+		blobSidecarData = blobSidecarsResp.Data
 	} else {
-		// Fall back to blob sidecars endpoint
+		// Fall back to blobs endpoint and compute commitments and proofs
 		if err != nil {
-			a.log.Debug("blobs endpoint failed, falling back to blob sidecars", "err", err)
+			a.log.Debug("blob sidecars endpoint failed, falling back to blobs", "err", err)
 		}
 
-		blobSidecarsResp, fallbackErr := a.beaconClient.BlobSidecars(ctx, &api.BlobSidecarsOpts{
+		blobs, fallbackErr := a.beaconClient.Blobs(ctx, &api.BlobsOpts{
 			Block: currentHeader.Data.Root.String(),
 		})
 
 		if fallbackErr != nil {
-			a.log.Error("failed to fetch blob sidecars", "err", fallbackErr)
+			a.log.Error("failed to fetch blobs", "err", fallbackErr)
 			return nil, false, fallbackErr
 		}
 
-		blobSidecarData = blobSidecarsResp.Data
+		if blobs == nil || blobs.Data == nil {
+			a.log.Error("blobs endpoint returned nil data")
+			return nil, false, errors.New("blobs endpoint returned nil data")
+		}
+
+		a.log.Debug("fetched blobs from blobs endpoint, computing KZG commitments and proofs", "count", len(blobs.Data))
+
+		var computeErr error
+		blobSidecarData, computeErr = blobsToSidecars(blobs.Data, currentHeader.Data)
+		if computeErr != nil {
+			a.log.Error("failed to compute KZG commitments and proofs for blobs", "err", computeErr)
+			return nil, false, computeErr
+		}
 	}
 
 	a.log.Debug("fetched blob sidecars", "count", len(blobSidecarData))

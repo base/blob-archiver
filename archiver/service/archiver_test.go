@@ -475,14 +475,14 @@ func TestArchiver_RearchiveRange(t *testing.T) {
 	require.Equal(t, fs.ReadOrFail(t, blobtest.Three).BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Three.String()])
 }
 
-func TestArchiver_FetchBlobs_FallbackToSidecars(t *testing.T) {
+func TestArchiver_FetchBlobSidecars_Success(t *testing.T) {
 	beacon := beacontest.NewDefaultStubBeaconClient(t)
-	beacon.FailBlobs = true // Make blobs endpoint fail
+	// FailSidecars = false (default) - blob sidecars endpoint should succeed
 	svc, fs := setup(t, beacon)
 
 	fs.CheckNotExistsOrFail(t, blobtest.One)
 
-	// Should fall back to blob sidecars endpoint
+	// Should use blob sidecars endpoint successfully
 	header, alreadyExists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.One.String(), false)
 	require.False(t, alreadyExists)
 	require.NoError(t, err)
@@ -493,14 +493,14 @@ func TestArchiver_FetchBlobs_FallbackToSidecars(t *testing.T) {
 	require.Equal(t, len(beacon.SidecarsByBlock[blobtest.One.String()]), len(stored.BlobSidecars.Data))
 }
 
-func TestArchiver_FetchBlobs_Success(t *testing.T) {
+func TestArchiver_FetchBlobs_FallbackToBlobs(t *testing.T) {
 	beacon := beacontest.NewDefaultStubBeaconClient(t)
-	// FailBlobs = false (default) - blobs endpoint should succeed
+	beacon.FailSidecars = true // Make blob sidecars endpoint fail
 	svc, fs := setup(t, beacon)
 
 	fs.CheckNotExistsOrFail(t, blobtest.Two)
 
-	// Should use blobs endpoint successfully
+	// Should fall back to blobs endpoint and compute KZG commitments/proofs
 	header, alreadyExists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.Two.String(), false)
 	require.False(t, alreadyExists)
 	require.NoError(t, err)
@@ -511,7 +511,7 @@ func TestArchiver_FetchBlobs_Success(t *testing.T) {
 	// Should have stored the correct number of blobs
 	require.Equal(t, len(beacon.SidecarsByBlock[blobtest.Two.String()]), len(stored.BlobSidecars.Data))
 
-	// Verify that KZG commitments and proofs were derived correctly
+	// Verify that KZG commitments and proofs were computed correctly from blob data
 	for i, storedSidecar := range stored.BlobSidecars.Data {
 		originalSidecar := beacon.SidecarsByBlock[blobtest.Two.String()][i]
 		// The blob data should match

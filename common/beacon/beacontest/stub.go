@@ -17,7 +17,7 @@ import (
 type StubBeaconClient struct {
 	Headers         map[string]*v1.BeaconBlockHeader
 	SidecarsByBlock map[string][]*deneb.BlobSidecar
-	FailBlobs       bool
+	FailSidecars    bool
 }
 
 func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.BeaconBlockHeaderOpts) (*api.Response[*v1.BeaconBlockHeader], error) {
@@ -31,6 +31,10 @@ func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.Beac
 }
 
 func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidecarsOpts) (*api.Response[[]*deneb.BlobSidecar], error) {
+	if s.FailSidecars {
+		return nil, fmt.Errorf("blob sidecars endpoint unavailable")
+	}
+
 	blobs, found := s.SidecarsByBlock[opts.Block]
 	if !found {
 		return nil, fmt.Errorf("block not found")
@@ -42,10 +46,6 @@ func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidec
 
 // Blobs implements the BlobsProvider interface, converting sidecars to blobs
 func (s *StubBeaconClient) Blobs(ctx context.Context, opts *api.BlobsOpts) (*api.Response[v1.Blobs], error) {
-	if s.FailBlobs {
-		return nil, fmt.Errorf("blobs endpoint unavailable")
-	}
-
 	sidecars, found := s.SidecarsByBlock[opts.Block]
 	if !found {
 		return nil, fmt.Errorf("block not found")
