@@ -15,8 +15,9 @@ import (
 )
 
 type StubBeaconClient struct {
-	Headers map[string]*v1.BeaconBlockHeader
-	Blobs   map[string][]*deneb.BlobSidecar
+	Headers         map[string]*v1.BeaconBlockHeader
+	SidecarsByBlock map[string][]*deneb.BlobSidecar
+	FailSidecars    bool
 }
 
 func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.BeaconBlockHeaderOpts) (*api.Response[*v1.BeaconBlockHeader], error) {
@@ -30,7 +31,11 @@ func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.Beac
 }
 
 func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidecarsOpts) (*api.Response[[]*deneb.BlobSidecar], error) {
-	blobs, found := s.Blobs[opts.Block]
+	if s.FailSidecars {
+		return nil, fmt.Errorf("blob sidecars endpoint unavailable")
+	}
+
+	blobs, found := s.SidecarsByBlock[opts.Block]
 	if !found {
 		return nil, fmt.Errorf("block not found")
 	}
@@ -39,10 +44,27 @@ func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidec
 	}, nil
 }
 
+// Blobs implements the BlobsProvider interface, converting sidecars to blobs
+func (s *StubBeaconClient) Blobs(ctx context.Context, opts *api.BlobsOpts) (*api.Response[v1.Blobs], error) {
+	sidecars, found := s.SidecarsByBlock[opts.Block]
+	if !found {
+		return nil, fmt.Errorf("block not found")
+	}
+
+	blobs := make(v1.Blobs, len(sidecars))
+	for i, sidecar := range sidecars {
+		blobs[i] = &sidecar.Blob
+	}
+
+	return &api.Response[v1.Blobs]{
+		Data: blobs,
+	}, nil
+}
+
 func NewEmptyStubBeaconClient() *StubBeaconClient {
 	return &StubBeaconClient{
-		Headers: make(map[string]*v1.BeaconBlockHeader),
-		Blobs:   make(map[string][]*deneb.BlobSidecar),
+		Headers:         make(map[string]*v1.BeaconBlockHeader),
+		SidecarsByBlock: make(map[string][]*deneb.BlobSidecar),
 	}
 }
 
@@ -61,22 +83,31 @@ func NewDefaultStubBeaconClient(t *testing.T) *StubBeaconClient {
 
 	startSlot := blobtest.StartSlot
 
-	originBlobs := blobtest.NewBlobSidecars(t, 1)
-	oneBlobs := blobtest.NewBlobSidecars(t, 2)
-	twoBlobs := blobtest.NewBlobSidecars(t, 0)
-	threeBlobs := blobtest.NewBlobSidecars(t, 4)
-	fourBlobs := blobtest.NewBlobSidecars(t, 5)
-	fiveBlobs := blobtest.NewBlobSidecars(t, 6)
+	// Create headers first so they can be used for blobs
+	originHeader := makeHeader(startSlot, blobtest.OriginBlock, common.Hash{9, 9, 9})
+	oneHeader := makeHeader(startSlot+1, blobtest.One, blobtest.OriginBlock)
+	twoHeader := makeHeader(startSlot+2, blobtest.Two, blobtest.One)
+	threeHeader := makeHeader(startSlot+3, blobtest.Three, blobtest.Two)
+	fourHeader := makeHeader(startSlot+4, blobtest.Four, blobtest.Three)
+	fiveHeader := makeHeader(startSlot+5, blobtest.Five, blobtest.Four)
+
+	// Create blobs with valid headers
+	originBlobs := blobtest.NewBlobSidecars(t, 1, originHeader.Header)
+	oneBlobs := blobtest.NewBlobSidecars(t, 2, oneHeader.Header)
+	twoBlobs := blobtest.NewBlobSidecars(t, 0, twoHeader.Header)
+	threeBlobs := blobtest.NewBlobSidecars(t, 4, threeHeader.Header)
+	fourBlobs := blobtest.NewBlobSidecars(t, 5, fourHeader.Header)
+	fiveBlobs := blobtest.NewBlobSidecars(t, 6, fiveHeader.Header)
 
 	return &StubBeaconClient{
 		Headers: map[string]*v1.BeaconBlockHeader{
 			// Lookup by hash
-			blobtest.OriginBlock.String(): makeHeader(startSlot, blobtest.OriginBlock, common.Hash{9, 9, 9}),
-			blobtest.One.String():         makeHeader(startSlot+1, blobtest.One, blobtest.OriginBlock),
-			blobtest.Two.String():         makeHeader(startSlot+2, blobtest.Two, blobtest.One),
-			blobtest.Three.String():       makeHeader(startSlot+3, blobtest.Three, blobtest.Two),
-			blobtest.Four.String():        makeHeader(startSlot+4, blobtest.Four, blobtest.Three),
-			blobtest.Five.String():        makeHeader(startSlot+5, blobtest.Five, blobtest.Four),
+			blobtest.OriginBlock.String(): originHeader,
+			blobtest.One.String():         oneHeader,
+			blobtest.Two.String():         twoHeader,
+			blobtest.Three.String():       threeHeader,
+			blobtest.Four.String():        fourHeader,
+			blobtest.Five.String():        fiveHeader,
 
 			// Lookup by identifier
 			"head":      makeHeader(startSlot+5, blobtest.Five, blobtest.Four),
@@ -90,7 +121,7 @@ func NewDefaultStubBeaconClient(t *testing.T) *StubBeaconClient {
 			strconv.FormatUint(startSlot+4, 10): makeHeader(startSlot+4, blobtest.Four, blobtest.Three),
 			strconv.FormatUint(startSlot+5, 10): makeHeader(startSlot+5, blobtest.Five, blobtest.Four),
 		},
-		Blobs: map[string][]*deneb.BlobSidecar{
+		SidecarsByBlock: map[string][]*deneb.BlobSidecar{
 			// Lookup by hash
 			blobtest.OriginBlock.String(): originBlobs,
 			blobtest.One.String():         oneBlobs,

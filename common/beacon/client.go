@@ -13,6 +13,7 @@ import (
 type Client interface {
 	client.BeaconBlockHeadersProvider
 	client.BlobSidecarsProvider
+	client.BlobsProvider
 }
 
 // NewBeaconClient returns a new HTTP beacon client.

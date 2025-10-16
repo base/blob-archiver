@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	client "github.com/attestantio/go-eth2-client"
 	"github.com/attestantio/go-eth2-client/api"
+	v1 "github.com/attestantio/go-eth2-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/deneb"
 	m "github.com/base/blob-archiver/api/metrics"
 	"github.com/base/blob-archiver/api/version"
@@ -20,6 +22,7 @@ import (
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -107,6 +110,7 @@ func NewAPI(dataStoreClient storage.DataStoreReader, beaconClient client.BeaconB
 	})
 
 	r.Get("/eth/v1/beacon/blob_sidecars/{id}", result.blobSidecarHandler)
+	r.Get("/eth/v1/beacon/blobs/{id}", result.blobsHandler)
 	r.Get("/eth/v1/node/version", result.versionHandler)
 
 	return result
@@ -263,4 +267,113 @@ func filterBlobs(blobs []*deneb.BlobSidecar, _indices []string) ([]*deneb.BlobSi
 	}
 
 	return filteredBlobs, nil
+}
+
+// filterBlobsByVersionedHashes filters sidecars by versioned hashes query parameter.
+// Returns the filtered sidecars in the order they were requested, or all sidecars if no hashes provided.
+func filterBlobsByVersionedHashes(sidecars []*deneb.BlobSidecar, _versionedHashes []string) ([]*deneb.BlobSidecar, *httpError) {
+	var versionedHashes []string
+	if len(_versionedHashes) == 0 {
+		return sidecars, nil
+	} else if len(_versionedHashes) == 1 {
+		versionedHashes = strings.Split(_versionedHashes[0], ",")
+	} else {
+		versionedHashes = _versionedHashes
+	}
+
+	// Build map of commitment hash -> sidecar for quick lookup
+	// CalcBlobHashV1 requires a sha256 hasher instance
+	hasher := sha256.New()
+	hashToSidecar := make(map[[32]byte]*deneb.BlobSidecar)
+	for _, sidecar := range sidecars {
+		hasher.Reset()
+		commitment := kzg4844.Commitment(sidecar.KZGCommitment)
+		vh := kzg4844.CalcBlobHashV1(hasher, &commitment)
+		hashToSidecar[vh] = sidecar
+	}
+
+	// Return sidecars in the order of requested hashes
+	filteredBlobs := make([]*deneb.BlobSidecar, 0, len(versionedHashes))
+	for _, hashStr := range versionedHashes {
+		hash := common.HexToHash(hashStr)
+		var versionedHash [32]byte
+		copy(versionedHash[:], hash[:])
+
+		if sidecar, ok := hashToSidecar[versionedHash]; ok {
+			filteredBlobs = append(filteredBlobs, sidecar)
+		}
+	}
+
+	return filteredBlobs, nil
+}
+
+// sidecarsToBlobs converts blob sidecars to a Blobs response by extracting only the blob data
+func sidecarsToBlobs(sidecars []*deneb.BlobSidecar) v1.Blobs {
+	blobs := make(v1.Blobs, len(sidecars))
+	for i, sidecar := range sidecars {
+		blobs[i] = &sidecar.Blob
+	}
+	return blobs
+}
+
+// blobsHandler implements the /eth/v1/beacon/blobs/{id} endpoint, using the underlying DataStoreReader
+// to fetch blobs instead of the beacon node. This endpoint serves blobs without KZG proofs.
+// Filtering by versioned_hashes query parameter is supported (per EIP-4844).
+func (a *API) blobsHandler(w http.ResponseWriter, r *http.Request) {
+	param := chi.URLParam(r, "id")
+	beaconBlockHash, err := a.toBeaconBlockHash(param)
+	if err != nil {
+		err.write(w)
+		return
+	}
+
+	result, storageErr := a.dataStoreClient.ReadBlob(r.Context(), beaconBlockHash)
+	if storageErr != nil {
+		if errors.Is(storageErr, storage.ErrNotFound) {
+			errUnknownBlock.write(w)
+		} else {
+			a.logger.Info("unexpected error fetching blobs", "err", storageErr, "beaconBlockHash", beaconBlockHash.String(), "param", param)
+			errServerError.write(w)
+		}
+		return
+	}
+
+	sidecars := result.BlobSidecars.Data
+
+	// Filter by versioned_hashes query parameter (not indices)
+	filteredSidecars, err := filterBlobsByVersionedHashes(sidecars, r.URL.Query()["versioned_hashes"])
+	if err != nil {
+		err.write(w)
+		return
+	}
+
+	// Convert sidecars to blobs
+	blobs := sidecarsToBlobs(filteredSidecars)
+	responseType := r.Header.Get("Accept")
+
+	if responseType == sszAcceptType {
+		w.Header().Set("Content-Type", sszAcceptType)
+		res, err := blobs.MarshalSSZ()
+		if err != nil {
+			a.logger.Error("unable to marshal blobs to SSZ", "err", err)
+			errServerError.write(w)
+			return
+		}
+
+		_, err = w.Write(res)
+
+		if err != nil {
+			a.logger.Error("unable to write ssz response", "err", err)
+			errServerError.write(w)
+			return
+		}
+	} else {
+		w.Header().Set("Content-Type", jsonAcceptType)
+		err := json.NewEncoder(w).Encode(blobs)
+		if err != nil {
+			a.logger.Error("unable to encode blobs to JSON", "err", err)
+			errServerError.write(w)
+			return
+		}
+	}
 }
