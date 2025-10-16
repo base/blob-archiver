@@ -34,7 +34,7 @@ type stubBlobSidecarClient struct {
 
 // setResponses configures the stub to return the same data as the beacon client for all FetchSidecars invocations
 func (s *stubBlobSidecarClient) setResponses(sbc *beacontest.StubBeaconClient) {
-	for k, v := range sbc.Blobs {
+	for k, v := range sbc.SidecarsByBlock {
 		s.data[k] = response{
 			data:       storage.BlobSidecars{Data: v},
 			err:        nil,
@@ -129,7 +129,7 @@ func TestValidatorService_CompletelyDifferentBlobData(t *testing.T) {
 	beacon.setResponses(headers)
 	blob.setResponses(headers)
 	blob.setResponse(blockOne, 200, storage.BlobSidecars{
-		Data: blobtest.NewBlobSidecars(t, 1),
+		Data: blobtest.NewBlobSidecars(t, 1, nil),
 	}, nil)
 
 	result := validator.checkBlobs(context.Background(), phase0.Slot(blobtest.StartSlot), phase0.Slot(blobtest.EndSlot))
@@ -193,7 +193,7 @@ func TestValidatorService_MistmatchedBlobFields(t *testing.T) {
 			blob.setResponses(headers)
 
 			// Deep copy the blob data
-			d, err := json.Marshal(headers.Blobs[blockOne])
+			d, err := json.Marshal(headers.SidecarsByBlock[blockOne])
 			require.NoError(t, err)
 			var c []*deneb.BlobSidecar
 			err = json.Unmarshal(d, &c)

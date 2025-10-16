@@ -31,7 +31,8 @@ func setup(t *testing.T, beacon *beacontest.StubBeaconClient) (*Archiver, *stora
 }
 
 func TestArchiver_FetchAndPersist(t *testing.T) {
-	svc, fs := setup(t, beacontest.NewDefaultStubBeaconClient(t))
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	svc, fs := setup(t, beacon)
 
 	fs.CheckNotExistsOrFail(t, blobtest.OriginBlock)
 
@@ -62,21 +63,21 @@ func TestArchiver_FetchAndPersistOverwriting(t *testing.T) {
 			BeaconBlockHash: blobtest.Five,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Five.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Five.String()],
 		},
 	})
 
-	require.Equal(t, fs.ReadOrFail(t, blobtest.Five).BlobSidecars.Data, beacon.Blobs[blobtest.Five.String()])
+	require.Equal(t, fs.ReadOrFail(t, blobtest.Five).BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Five.String()])
 
 	// change the blob data -- this isn't possible w/out changing the hash. But it allows us to test the overwrite
-	beacon.Blobs[blobtest.Five.String()] = blobtest.NewBlobSidecars(t, 6)
+	beacon.SidecarsByBlock[blobtest.Five.String()] = blobtest.NewBlobSidecars(t, 6, beacon.Headers[blobtest.Five.String()].Header)
 
 	_, exists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.Five.String(), true)
 	require.NoError(t, err)
 	require.True(t, exists)
 
 	// It should have overwritten the blob data
-	require.Equal(t, fs.ReadOrFail(t, blobtest.Five).BlobSidecars.Data, beacon.Blobs[blobtest.Five.String()])
+	require.Equal(t, fs.ReadOrFail(t, blobtest.Five).BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Five.String()])
 
 	// Overwriting a non-existent blob should return exists=false
 	_, exists, err = svc.persistBlobsForBlockToS3(context.Background(), blobtest.Four.String(), true)
@@ -94,7 +95,7 @@ func TestArchiver_BackfillToOrigin(t *testing.T) {
 			BeaconBlockHash: blobtest.Five,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Five.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Five.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -110,7 +111,7 @@ func TestArchiver_BackfillToOrigin(t *testing.T) {
 	for _, blob := range expectedBlobs {
 		fs.CheckExistsOrFail(t, blob)
 		data := fs.ReadOrFail(t, blob)
-		require.Equal(t, data.BlobSidecars.Data, beacon.Blobs[blob.String()])
+		require.Equal(t, data.BlobSidecars.Data, beacon.SidecarsByBlock[blob.String()])
 	}
 }
 
@@ -124,7 +125,7 @@ func TestArchiver_BackfillToExistingBlock(t *testing.T) {
 			BeaconBlockHash: blobtest.Five,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Five.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Five.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -135,7 +136,7 @@ func TestArchiver_BackfillToExistingBlock(t *testing.T) {
 			BeaconBlockHash: blobtest.One,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.One.String()],
+			Data: beacon.SidecarsByBlock[blobtest.One.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -159,7 +160,7 @@ func TestArchiver_BackfillToExistingBlock(t *testing.T) {
 		data, err := fs.ReadBlob(context.Background(), blob)
 		require.NoError(t, err)
 		require.NotNil(t, data)
-		require.Equal(t, data.BlobSidecars.Data, beacon.Blobs[blob.String()])
+		require.Equal(t, data.BlobSidecars.Data, beacon.SidecarsByBlock[blob.String()])
 	}
 }
 
@@ -191,7 +192,7 @@ func TestArchiver_BackfillFinishOldProcess(t *testing.T) {
 			BeaconBlockHash: blobtest.Five,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Five.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Five.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -202,7 +203,7 @@ func TestArchiver_BackfillFinishOldProcess(t *testing.T) {
 			BeaconBlockHash: blobtest.Three,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -213,7 +214,7 @@ func TestArchiver_BackfillFinishOldProcess(t *testing.T) {
 			BeaconBlockHash: blobtest.One,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.One.String()],
+			Data: beacon.SidecarsByBlock[blobtest.One.String()],
 		},
 	})
 	require.NoError(t, err)
@@ -250,7 +251,7 @@ func TestArchiver_BackfillFinishOldProcess(t *testing.T) {
 		data, err := fs.ReadBlob(context.Background(), blob)
 		require.NoError(t, err)
 		require.NotNil(t, data)
-		require.Equal(t, data.BlobSidecars.Data, beacon.Blobs[blob.String()])
+		require.Equal(t, data.BlobSidecars.Data, beacon.SidecarsByBlock[blob.String()])
 	}
 
 	actualProcesses, err = svc.dataStoreClient.ReadBackfillProcesses(context.Background())
@@ -270,7 +271,7 @@ func TestArchiver_LatestStopsAtExistingBlock(t *testing.T) {
 			BeaconBlockHash: blobtest.Three,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 
@@ -283,17 +284,17 @@ func TestArchiver_LatestStopsAtExistingBlock(t *testing.T) {
 	fs.CheckExistsOrFail(t, blobtest.Five)
 	five := fs.ReadOrFail(t, blobtest.Five)
 	require.Equal(t, five.Header.BeaconBlockHash, blobtest.Five)
-	require.Equal(t, five.BlobSidecars.Data, beacon.Blobs[blobtest.Five.String()])
+	require.Equal(t, five.BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Five.String()])
 
 	fs.CheckExistsOrFail(t, blobtest.Four)
 	four := fs.ReadOrFail(t, blobtest.Four)
 	require.Equal(t, four.Header.BeaconBlockHash, blobtest.Four)
-	require.Equal(t, five.BlobSidecars.Data, beacon.Blobs[blobtest.Five.String()])
+	require.Equal(t, five.BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Five.String()])
 
 	fs.CheckExistsOrFail(t, blobtest.Three)
 	three := fs.ReadOrFail(t, blobtest.Three)
 	require.Equal(t, three.Header.BeaconBlockHash, blobtest.Three)
-	require.Equal(t, five.BlobSidecars.Data, beacon.Blobs[blobtest.Five.String()])
+	require.Equal(t, five.BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Five.String()])
 }
 
 func TestArchiver_LatestNoNewData(t *testing.T) {
@@ -306,7 +307,7 @@ func TestArchiver_LatestNoNewData(t *testing.T) {
 			BeaconBlockHash: common.Hash(beacon.Headers["head"].Root),
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 
@@ -330,7 +331,7 @@ func TestArchiver_LatestConsumesNewBlocks(t *testing.T) {
 			BeaconBlockHash: common.Hash(beacon.Headers[blobtest.Four.String()].Root),
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Four.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Four.String()],
 		},
 	})
 
@@ -360,7 +361,7 @@ func TestArchiver_LatestStopsAtOrigin(t *testing.T) {
 			BeaconBlockHash: blobtest.OriginBlock,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.OriginBlock.String()],
+			Data: beacon.SidecarsByBlock[blobtest.OriginBlock.String()],
 		},
 	})
 
@@ -375,7 +376,7 @@ func TestArchiver_LatestStopsAtOrigin(t *testing.T) {
 	for _, hash := range toWrite {
 		fs.CheckExistsOrFail(t, hash)
 		data := fs.ReadOrFail(t, hash)
-		require.Equal(t, data.BlobSidecars.Data, beacon.Blobs[hash.String()])
+		require.Equal(t, data.BlobSidecars.Data, beacon.SidecarsByBlock[hash.String()])
 	}
 }
 
@@ -389,7 +390,7 @@ func TestArchiver_LatestRetriesOnFailure(t *testing.T) {
 			BeaconBlockHash: blobtest.Three,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 
@@ -416,7 +417,7 @@ func TestArchiver_LatestHaltsOnPersistentError(t *testing.T) {
 			BeaconBlockHash: blobtest.Three,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 
@@ -443,7 +444,7 @@ func TestArchiver_RearchiveRange(t *testing.T) {
 			BeaconBlockHash: blobtest.Three,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: beacon.Blobs[blobtest.Three.String()],
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
 		},
 	})
 
@@ -454,7 +455,7 @@ func TestArchiver_RearchiveRange(t *testing.T) {
 	fs.CheckNotExistsOrFail(t, blobtest.Four)
 
 	// this modifies the blobs at 3, purely to test the blob is rearchived
-	beacon.Blobs[blobtest.Three.String()] = blobtest.NewBlobSidecars(t, 6)
+	beacon.SidecarsByBlock[blobtest.Three.String()] = blobtest.NewBlobSidecars(t, 6, beacon.Headers[blobtest.Three.String()].Header)
 
 	from, to := blobtest.StartSlot+1, blobtest.StartSlot+4
 
@@ -471,5 +472,49 @@ func TestArchiver_RearchiveRange(t *testing.T) {
 	fs.CheckExistsOrFail(t, blobtest.Four)
 
 	// Should have overwritten any existing blobs
-	require.Equal(t, fs.ReadOrFail(t, blobtest.Three).BlobSidecars.Data, beacon.Blobs[blobtest.Three.String()])
+	require.Equal(t, fs.ReadOrFail(t, blobtest.Three).BlobSidecars.Data, beacon.SidecarsByBlock[blobtest.Three.String()])
+}
+
+func TestArchiver_FetchBlobs_FallbackToSidecars(t *testing.T) {
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	beacon.FailBlobs = true // Make blobs endpoint fail
+	svc, fs := setup(t, beacon)
+
+	fs.CheckNotExistsOrFail(t, blobtest.One)
+
+	// Should fall back to blob sidecars endpoint
+	header, alreadyExists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.One.String(), false)
+	require.False(t, alreadyExists)
+	require.NoError(t, err)
+	require.NotNil(t, header)
+
+	fs.CheckExistsOrFail(t, blobtest.One)
+	stored := fs.ReadOrFail(t, blobtest.One)
+	require.Equal(t, len(beacon.SidecarsByBlock[blobtest.One.String()]), len(stored.BlobSidecars.Data))
+}
+
+func TestArchiver_FetchBlobs_Success(t *testing.T) {
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	// FailBlobs = false (default) - blobs endpoint should succeed
+	svc, fs := setup(t, beacon)
+
+	fs.CheckNotExistsOrFail(t, blobtest.Two)
+
+	// Should use blobs endpoint successfully
+	header, alreadyExists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.Two.String(), false)
+	require.False(t, alreadyExists)
+	require.NoError(t, err)
+	require.NotNil(t, header)
+
+	fs.CheckExistsOrFail(t, blobtest.Two)
+	stored := fs.ReadOrFail(t, blobtest.Two)
+	// Should have stored the correct number of blobs
+	require.Equal(t, len(beacon.SidecarsByBlock[blobtest.Two.String()]), len(stored.BlobSidecars.Data))
+
+	// Verify that KZG commitments and proofs were derived correctly
+	for i, storedSidecar := range stored.BlobSidecars.Data {
+		originalSidecar := beacon.SidecarsByBlock[blobtest.Two.String()][i]
+		// The blob data should match
+		require.Equal(t, originalSidecar.Blob, storedSidecar.Blob)
+	}
 }

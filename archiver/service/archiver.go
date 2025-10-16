@@ -9,9 +9,11 @@ import (
 	client "github.com/attestantio/go-eth2-client"
 	"github.com/attestantio/go-eth2-client/api"
 	v1 "github.com/attestantio/go-eth2-client/api/v1"
+	"github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/base/blob-archiver/archiver/flags"
 	"github.com/base/blob-archiver/archiver/metrics"
 	"github.com/base/blob-archiver/common/storage"
+	gokzg4844 "github.com/crate-crypto/go-kzg-4844"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -25,9 +27,47 @@ const (
 	backfillErrorRetryInterval     = 5 * time.Second
 )
 
+// blobsToSidecars converts blobs to blob sidecars by computing KZG commitments and proofs from the blob data.
+// The blobs and commitments are ordered identically (by KZG commitment order in the block).
+// The header information is included from the provided header.
+func blobsToSidecars(blobs v1.Blobs, header *v1.BeaconBlockHeader) ([]*deneb.BlobSidecar, error) {
+	kzgCtx, err := gokzg4844.NewContext4096Secure()
+	if err != nil {
+		return nil, err
+	}
+
+	sidecars := make([]*deneb.BlobSidecar, len(blobs))
+	for i, blob := range blobs {
+		// Cast to gokzg4844.Blob for KZG operations
+		kzgBlob := (*gokzg4844.Blob)(blob)
+
+		// Compute KZG commitment from blob data
+		commitment, err := kzgCtx.BlobToKZGCommitment(kzgBlob, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		// Compute KZG proof from blob data and commitment
+		proof, err := kzgCtx.ComputeBlobKZGProof(kzgBlob, commitment, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		sidecars[i] = &deneb.BlobSidecar{
+			Index:             deneb.BlobIndex(i),
+			Blob:              *blob,
+			KZGCommitment:     deneb.KZGCommitment(commitment),
+			KZGProof:          deneb.KZGProof(proof),
+			SignedBlockHeader: header.Header,
+		}
+	}
+	return sidecars, nil
+}
+
 type BeaconClient interface {
 	client.BlobSidecarsProvider
 	client.BeaconBlockHeadersProvider
+	client.BlobsProvider
 }
 
 func NewArchiver(l log.Logger, cfg flags.ArchiverConfig, dataStoreClient storage.DataStore, client BeaconClient, m metrics.Metricer) (*Archiver, error) {
@@ -84,6 +124,9 @@ func (a *Archiver) Stop(ctx context.Context) error {
 // If the blobs are already stored, it will not overwrite the data. Currently, the archiver does not
 // perform any validation of the blobs, it assumes a trusted beacon node. See:
 // https://github.com/base/blob-archiver/issues/4.
+//
+// The function prefers the /eth/v1/beacon/blobs endpoint but falls back to /eth/v1/beacon/blob_sidecars
+// if the blobs endpoint fails.
 func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier string, overwrite bool) (*v1.BeaconBlockHeader, bool, error) {
 	currentHeader, err := a.beaconClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
 		Block: blockIdentifier,
@@ -105,22 +148,47 @@ func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier
 		return currentHeader.Data, true, nil
 	}
 
-	blobSidecars, err := a.beaconClient.BlobSidecars(ctx, &api.BlobSidecarsOpts{
+	// Try the new blobs endpoint first
+	var blobSidecarData []*deneb.BlobSidecar
+	blobs, err := a.beaconClient.Blobs(ctx, &api.BlobsOpts{
 		Block: currentHeader.Data.Root.String(),
 	})
 
-	if err != nil {
-		a.log.Error("failed to fetch blob sidecars", "err", err)
-		return nil, false, err
+	if err == nil && blobs != nil && blobs.Data != nil && len(blobs.Data) > 0 {
+		// Successfully fetched blobs, compute commitments and proofs from blob data
+		a.log.Debug("fetched blobs from blobs endpoint, computing KZG commitments and proofs", "count", len(blobs.Data))
+
+		var err error
+		blobSidecarData, err = blobsToSidecars(blobs.Data, currentHeader.Data)
+		if err != nil {
+			a.log.Error("failed to compute KZG commitments and proofs for blobs", "err", err)
+			return nil, false, err
+		}
+	} else {
+		// Fall back to blob sidecars endpoint
+		if err != nil {
+			a.log.Debug("blobs endpoint failed, falling back to blob sidecars", "err", err)
+		}
+
+		blobSidecarsResp, fallbackErr := a.beaconClient.BlobSidecars(ctx, &api.BlobSidecarsOpts{
+			Block: currentHeader.Data.Root.String(),
+		})
+
+		if fallbackErr != nil {
+			a.log.Error("failed to fetch blob sidecars", "err", fallbackErr)
+			return nil, false, fallbackErr
+		}
+
+		blobSidecarData = blobSidecarsResp.Data
 	}
 
-	a.log.Debug("fetched blob sidecars", "count", len(blobSidecars.Data))
+	a.log.Debug("fetched blob sidecars", "count", len(blobSidecarData))
 
 	blobData := storage.BlobData{
 		Header: storage.Header{
 			BeaconBlockHash: common.Hash(currentHeader.Data.Root),
 		},
-		BlobSidecars: storage.BlobSidecars{Data: blobSidecars.Data},
+		BlobSidecars: storage.BlobSidecars{Data: blobSidecarData},
 	}
 
 	// The blob that is being written has not been validated. It is assumed that the beacon node is trusted.
@@ -131,7 +199,7 @@ func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier
 		return nil, false, err
 	}
 
-	a.metrics.RecordStoredBlobs(len(blobSidecars.Data))
+	a.metrics.RecordStoredBlobs(len(blobSidecarData))
 
 	return currentHeader.Data, exists, nil
 }

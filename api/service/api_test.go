@@ -3,6 +3,7 @@ package service
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 )
@@ -80,7 +82,7 @@ func TestAPIService(t *testing.T) {
 			BeaconBlockHash: rootOne,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: blobtest.NewBlobSidecars(t, 2),
+			Data: blobtest.NewBlobSidecars(t, 2, nil),
 		},
 	}
 
@@ -89,7 +91,7 @@ func TestAPIService(t *testing.T) {
 			BeaconBlockHash: rootTwo,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: blobtest.NewBlobSidecars(t, 2),
+			Data: blobtest.NewBlobSidecars(t, 2, nil),
 		},
 	}
 
@@ -99,7 +101,7 @@ func TestAPIService(t *testing.T) {
 			BeaconBlockHash: rootThree,
 		},
 		BlobSidecars: storage.BlobSidecars{
-			Data: blobtest.NewBlobSidecars(t, 8), // More than 6 blobs
+			Data: blobtest.NewBlobSidecars(t, 8, nil), // More than 6 blobs
 		},
 	}
 
@@ -363,4 +365,131 @@ func TestHealthHandler(t *testing.T) {
 	a.router.ServeHTTP(response, request)
 
 	require.Equal(t, 200, response.Code)
+}
+
+func TestBlobsHandlerJSON(t *testing.T) {
+	a, fs, _, cleanup := setup(t)
+	defer cleanup()
+
+	// Pre-populate storage with blob sidecars
+	testBlobs := blobtest.NewBlobSidecars(t, 3, nil)
+	data := storage.BlobData{
+		Header: storage.Header{
+			BeaconBlockHash: blobtest.Five,
+		},
+		BlobSidecars: storage.BlobSidecars{
+			Data: testBlobs,
+		},
+	}
+	err := fs.WriteBlob(context.Background(), data)
+	require.NoError(t, err)
+
+	// Request blobs endpoint with JSON encoding
+	request := httptest.NewRequest("GET", "/eth/v1/beacon/blobs/"+blobtest.Five.String(), nil)
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	a.router.ServeHTTP(response, request)
+
+	require.Equal(t, 200, response.Code)
+	require.Equal(t, "application/json", response.Header().Get("Content-Type"))
+
+	var blobs v1.Blobs
+	err = json.Unmarshal(response.Body.Bytes(), &blobs)
+	require.NoError(t, err)
+	require.Equal(t, len(testBlobs), len(blobs))
+
+	// Verify blob data matches
+	for i, blob := range blobs {
+		require.Equal(t, testBlobs[i].Blob, *blob)
+	}
+}
+
+func TestBlobsHandlerSSZ(t *testing.T) {
+	a, fs, _, cleanup := setup(t)
+	defer cleanup()
+
+	// Pre-populate storage with blob sidecars
+	testBlobs := blobtest.NewBlobSidecars(t, 2, nil)
+	data := storage.BlobData{
+		Header: storage.Header{
+			BeaconBlockHash: blobtest.One,
+		},
+		BlobSidecars: storage.BlobSidecars{
+			Data: testBlobs,
+		},
+	}
+	err := fs.WriteBlob(context.Background(), data)
+	require.NoError(t, err)
+
+	// Request blobs endpoint with SSZ encoding
+	request := httptest.NewRequest("GET", "/eth/v1/beacon/blobs/"+blobtest.One.String(), nil)
+	request.Header.Set("Accept", "application/octet-stream")
+	response := httptest.NewRecorder()
+
+	a.router.ServeHTTP(response, request)
+
+	require.Equal(t, 200, response.Code)
+	require.Equal(t, "application/octet-stream", response.Header().Get("Content-Type"))
+
+	// Unmarshal SSZ response
+	blobs := v1.Blobs{}
+	err = blobs.UnmarshalSSZ(response.Body.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, len(testBlobs), len(blobs))
+}
+
+func TestBlobsHandlerWithVersionedHashes(t *testing.T) {
+	a, fs, _, cleanup := setup(t)
+	defer cleanup()
+
+	// Pre-populate storage with blob sidecars
+	testBlobs := blobtest.NewBlobSidecars(t, 5, nil)
+	data := storage.BlobData{
+		Header: storage.Header{
+			BeaconBlockHash: blobtest.Four,
+		},
+		BlobSidecars: storage.BlobSidecars{
+			Data: testBlobs,
+		},
+	}
+	err := fs.WriteBlob(context.Background(), data)
+	require.NoError(t, err)
+
+	// Compute versioned hashes from commitments
+	hasher := sha256.New()
+	commitment0 := kzg4844.Commitment(testBlobs[0].KZGCommitment)
+	vh0 := kzg4844.CalcBlobHashV1(hasher, &commitment0)
+
+	hasher.Reset()
+	commitment2 := kzg4844.Commitment(testBlobs[2].KZGCommitment)
+	vh2 := kzg4844.CalcBlobHashV1(hasher, &commitment2)
+
+	// Request blobs endpoint with versioned_hashes filter
+	request := httptest.NewRequest("GET", fmt.Sprintf("/eth/v1/beacon/blobs/%s?versioned_hashes=%s&versioned_hashes=%s", blobtest.Four.String(), common.Hash(vh0).Hex(), common.Hash(vh2).Hex()), nil)
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	a.router.ServeHTTP(response, request)
+
+	require.Equal(t, 200, response.Code)
+
+	var blobs v1.Blobs
+	err = json.Unmarshal(response.Body.Bytes(), &blobs)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(blobs))
+}
+
+func TestBlobsHandlerNotFound(t *testing.T) {
+	a, _, _, cleanup := setup(t)
+	defer cleanup()
+
+	// Request blobs endpoint for non-existent block
+	request := httptest.NewRequest("GET", "/eth/v1/beacon/blobs/"+blobtest.Seven.String(), nil)
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+
+	a.router.ServeHTTP(response, request)
+
+	require.Equal(t, 404, response.Code)
 }

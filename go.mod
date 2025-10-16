@@ -97,3 +97,5 @@ require (
 )
 
 replace github.com/ethereum/go-ethereum v1.101500.1 => github.com/ethereum-optimism/op-geth v1.101500.1
+
+replace github.com/attestantio/go-eth2-client => github.com/pk910/go-eth2-client v0.0.0-20251008201737-cffbe3a2917c
