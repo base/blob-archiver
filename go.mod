@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/attestantio/go-eth2-client v0.27.1
+	github.com/crate-crypto/go-kzg-4844 v1.1.0
 	github.com/ethereum-optimism/optimism v1.11.2
 	github.com/ethereum/go-ethereum v1.101500.1
 	github.com/go-chi/chi/v5 v5.0.12
@@ -25,7 +26,6 @@ require (
 	github.com/consensys/gnark-crypto v0.16.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20240724233137-53bbb0ceb27a // indirect
-	github.com/crate-crypto/go-kzg-4844 v1.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0 // indirect
