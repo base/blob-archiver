@@ -12,9 +12,11 @@ import (
 	client "github.com/attestantio/go-eth2-client"
 	"github.com/attestantio/go-eth2-client/api"
 	v1 "github.com/attestantio/go-eth2-client/api/v1"
+	"github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/base/blob-archiver/common/storage"
 	"github.com/base/blob-archiver/validator/flags"
+	gokzg4844 "github.com/crate-crypto/go-kzg-4844"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -115,6 +117,29 @@ func shouldRetry(status int) bool {
 	}
 }
 
+// verifyKZGProofs validates that the KZG proofs in the blob sidecars are valid for the blob data.
+// Returns nil if all proofs are valid, error otherwise.
+func verifyKZGProofs(sidecars []*deneb.BlobSidecar) error {
+	kzgCtx, err := gokzg4844.NewContext4096Secure()
+	if err != nil {
+		return fmt.Errorf("failed to create KZG context: %w", err)
+	}
+
+	for i, sidecar := range sidecars {
+		kzgBlob := (*gokzg4844.Blob)(&sidecar.Blob)
+		commitment := gokzg4844.KZGCommitment(sidecar.KZGCommitment)
+		proof := gokzg4844.KZGProof(sidecar.KZGProof)
+
+		// Verify the KZG proof - returns error if invalid
+		err := kzgCtx.VerifyBlobKZGProof(kzgBlob, commitment, proof)
+		if err != nil {
+			return fmt.Errorf("KZG proof verification failed for sidecar %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
 // fetchWithRetries fetches the sidecar and handles retryable error cases (5xx status codes + 429 + connection errors)
 func fetchWithRetries(ctx context.Context, endpoint BlobSidecarClient, id string, format Format) (int, storage.BlobSidecars, error) {
 	return retry.Do2(ctx, retryAttempts, retry.Exponential(), func() (int, storage.BlobSidecars, error) {
@@ -171,11 +196,43 @@ func (a *ValidatorService) checkBlobs(ctx context.Context, start phase0.Slot, en
 			}
 
 			if !reflect.DeepEqual(beaconResponse, blobResponse) {
-				result.MismatchedData = append(result.MismatchedData, id)
-				l.Error(validationErrorLog, "reason", "response-mismatch")
-			}
+				// Data mismatch detected - first check if sidecar counts match
+				if len(beaconResponse.Data) != len(blobResponse.Data) {
+					// Different number of sidecars - this is a real error
+					result.MismatchedData = append(result.MismatchedData, id)
+					l.Error(validationErrorLog, "reason", "response-mismatch", "beaconCount", len(beaconResponse.Data), "blobApiCount", len(blobResponse.Data))
+					continue
+				}
 
-			l.Info("completed blob check", "blobs", len(beaconResponse.Data))
+				// Same number of sidecars - verify if the blob API's KZG proofs are valid
+				// This handles cases where the beacon node returns zeroed out KZG proofs post-Fulu
+				if err := verifyKZGProofs(blobResponse.Data); err != nil {
+					// Blob API has invalid KZG proofs - this is a real error
+					result.MismatchedData = append(result.MismatchedData, id)
+					l.Error(validationErrorLog, "reason", "response-mismatch", "kzgVerification", "failed", "error", err)
+				} else {
+					// Blob API's KZG proofs are valid - now check if only KZG fields differ
+					// Create a copy of blobResponse with beacon's KZG proofs
+					normalizedBlobResponse := storage.BlobSidecars{Data: make([]*deneb.BlobSidecar, len(blobResponse.Data))}
+					for i, sidecar := range blobResponse.Data {
+						normalized := *sidecar // shallow copy
+						// Copy KZG fields from beacon response
+						normalized.KZGProof = beaconResponse.Data[i].KZGProof
+						normalized.KZGCommitment = beaconResponse.Data[i].KZGCommitment
+						normalized.KZGCommitmentInclusionProof = beaconResponse.Data[i].KZGCommitmentInclusionProof
+						normalizedBlobResponse.Data[i] = &normalized
+					}
+
+					// Compare again with normalized KZG values
+					if !reflect.DeepEqual(beaconResponse, normalizedBlobResponse) {
+						// Other fields differ - this is a real error
+						result.MismatchedData = append(result.MismatchedData, id)
+						l.Error(validationErrorLog, "reason", "response-mismatch", "kzgVerification", "passed", "note", "blob data differs beyond KZG fields")
+					}
+				}
+			} else {
+				l.Info("completed blob check", "blobs", len(beaconResponse.Data))
+			}
 		}
 
 		// Check if we should stop validation otherwise continue

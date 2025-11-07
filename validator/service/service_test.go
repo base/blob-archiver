@@ -159,27 +159,9 @@ func TestValidatorService_MistmatchedBlobFields(t *testing.T) {
 			},
 		},
 		{
-			name: "mismatched kzg commitment",
-			modification: func(i *[]*deneb.BlobSidecar) {
-				(*i)[0].KZGCommitment = deneb.KZGCommitment{0, 0, 0}
-			},
-		},
-		{
-			name: "mismatched kzg proof",
-			modification: func(i *[]*deneb.BlobSidecar) {
-				(*i)[0].KZGProof = deneb.KZGProof{0, 0, 0}
-			},
-		},
-		{
 			name: "mismatched signed block header",
 			modification: func(i *[]*deneb.BlobSidecar) {
 				(*i)[0].SignedBlockHeader = nil
-			},
-		},
-		{
-			name: "mismatched kzg commitment inclusion proof",
-			modification: func(i *[]*deneb.BlobSidecar) {
-				(*i)[0].KZGCommitmentInclusionProof = deneb.KZGCommitmentInclusionProof{{1, 2, 9}}
 			},
 		},
 	}
@@ -214,4 +196,101 @@ func TestValidatorService_MistmatchedBlobFields(t *testing.T) {
 			require.Equal(t, result.MismatchedData, []string{blockOne, blockOne})
 		})
 	}
+}
+
+// TestValidatorService_KZGProofMismatchWithValidBlobAPI tests the scenario where:
+// - Beacon node returns invalid/zeroed KZG proofs (e.g., post-Fulu blob)
+// - Blob API has valid computed KZG proofs
+// - All other data matches
+// This should be accepted as valid
+func TestValidatorService_KZGProofMismatchWithValidBlobAPI(t *testing.T) {
+	validator, headers, beacon, blob := setup(t)
+
+	beacon.setResponses(headers)
+	blob.setResponses(headers)
+
+	// Deep copy the beacon data and zero out KZG fields to simulate beacon node bug
+	d, err := json.Marshal(headers.SidecarsByBlock[blockOne])
+	require.NoError(t, err)
+	var beaconData []*deneb.BlobSidecar
+	err = json.Unmarshal(d, &beaconData)
+	require.NoError(t, err)
+
+	// Simulate beacon node bug: set KZG proof to point at infinity (0xc0...)
+	for i := range beaconData {
+		beaconData[i].KZGProof = deneb.KZGProof{0xc0}
+		beaconData[i].KZGCommitmentInclusionProof = deneb.KZGCommitmentInclusionProof{}
+	}
+
+	beacon.setResponse(blockOne, 200, storage.BlobSidecars{Data: beaconData}, nil)
+
+	result := validator.checkBlobs(context.Background(), phase0.Slot(blobtest.StartSlot), phase0.Slot(blobtest.EndSlot))
+
+	// Should have no errors - KZG mismatch accepted because blob API has valid proofs
+	require.Empty(t, result.MismatchedStatus)
+	require.Empty(t, result.ErrorFetching)
+	require.Empty(t, result.MismatchedData)
+}
+
+// TestValidatorService_KZGProofMismatchWithInvalidBlobAPI tests the scenario where:
+// - Both beacon node and blob API have different KZG proofs
+// - Blob API's KZG proofs are INVALID
+// This should be reported as an error
+func TestValidatorService_KZGProofMismatchWithInvalidBlobAPI(t *testing.T) {
+	validator, headers, beacon, blob := setup(t)
+
+	beacon.setResponses(headers)
+	blob.setResponses(headers)
+
+	// Deep copy the blob data and set invalid KZG proof
+	d, err := json.Marshal(headers.SidecarsByBlock[blockOne])
+	require.NoError(t, err)
+	var blobData []*deneb.BlobSidecar
+	err = json.Unmarshal(d, &blobData)
+	require.NoError(t, err)
+
+	// Set invalid KZG proof on blob API
+	for i := range blobData {
+		blobData[i].KZGProof = deneb.KZGProof{0xde, 0xad, 0xbe, 0xef}
+	}
+
+	blob.setResponse(blockOne, 200, storage.BlobSidecars{Data: blobData}, nil)
+
+	result := validator.checkBlobs(context.Background(), phase0.Slot(blobtest.StartSlot), phase0.Slot(blobtest.EndSlot))
+
+	// Should report mismatch because blob API has invalid KZG proofs
+	require.Empty(t, result.MismatchedStatus)
+	require.Empty(t, result.ErrorFetching)
+	require.Len(t, result.MismatchedData, 2)
+	require.Equal(t, result.MismatchedData, []string{blockOne, blockOne})
+}
+
+// TestValidatorService_DifferentSidecarCount tests the scenario where:
+// - Beacon and blob API return different numbers of sidecars
+// This should be reported as an error
+func TestValidatorService_DifferentSidecarCount(t *testing.T) {
+	validator, headers, beacon, blob := setup(t)
+
+	beacon.setResponses(headers)
+	blob.setResponses(headers)
+
+	// Set blob API to return fewer sidecars
+	d, err := json.Marshal(headers.SidecarsByBlock[blockOne])
+	require.NoError(t, err)
+	var blobData []*deneb.BlobSidecar
+	err = json.Unmarshal(d, &blobData)
+	require.NoError(t, err)
+
+	// Remove one sidecar
+	blobData = blobData[:len(blobData)-1]
+
+	blob.setResponse(blockOne, 200, storage.BlobSidecars{Data: blobData}, nil)
+
+	result := validator.checkBlobs(context.Background(), phase0.Slot(blobtest.StartSlot), phase0.Slot(blobtest.EndSlot))
+
+	// Should report mismatch due to different sidecar counts
+	require.Empty(t, result.MismatchedStatus)
+	require.Empty(t, result.ErrorFetching)
+	require.Len(t, result.MismatchedData, 2)
+	require.Equal(t, result.MismatchedData, []string{blockOne, blockOne})
 }
