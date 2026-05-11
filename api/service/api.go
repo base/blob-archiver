@@ -89,6 +89,28 @@ type API struct {
 	metrics         m.Metricer
 }
 
+type beaconResponseMetadata struct {
+	ExecutionOptimistic bool
+	Finalized           bool
+}
+
+type beaconBlockInfo struct {
+	Hash     common.Hash
+	Metadata beaconResponseMetadata
+}
+
+type beaconBlobSidecarsResponse struct {
+	ExecutionOptimistic bool                 `json:"execution_optimistic"`
+	Finalized           bool                 `json:"finalized"`
+	Data                []*deneb.BlobSidecar `json:"data"`
+}
+
+type beaconBlobsResponse struct {
+	ExecutionOptimistic bool     `json:"execution_optimistic"`
+	Finalized           bool     `json:"finalized"`
+	Data                v1.Blobs `json:"data"`
+}
+
 func NewAPI(dataStoreClient storage.DataStoreReader, beaconClient client.BeaconBlockHeadersProvider, metrics m.Metricer, logger log.Logger) *API {
 	result := &API{
 		dataStoreClient: dataStoreClient,
@@ -133,16 +155,6 @@ func isSlot(id string) bool {
 
 func isKnownIdentifier(id string) bool {
 	return slices.Contains([]string{"genesis", "finalized", "head"}, id)
-}
-
-type beaconResponseMetadata struct {
-	ExecutionOptimistic bool
-	Finalized           bool
-}
-
-type beaconBlockInfo struct {
-	Hash     common.Hash
-	Metadata beaconResponseMetadata
 }
 
 func metadataBool(metadata map[string]any, key string) bool {
@@ -218,12 +230,6 @@ func (a *API) toBeaconBlockInfo(ctx context.Context, id string) (beaconBlockInfo
 		a.metrics.RecordBlockIdType(m.BlockIdTypeInvalid)
 		return beaconBlockInfo{}, newBlockIdError(id)
 	}
-}
-
-type beaconBlobSidecarsResponse struct {
-	ExecutionOptimistic bool                 `json:"execution_optimistic"`
-	Finalized           bool                 `json:"finalized"`
-	Data                []*deneb.BlobSidecar `json:"data"`
 }
 
 func newBeaconBlobSidecarsResponse(metadata beaconResponseMetadata, data []*deneb.BlobSidecar) beaconBlobSidecarsResponse {
@@ -375,12 +381,6 @@ func sidecarsToBlobs(sidecars []*deneb.BlobSidecar) v1.Blobs {
 		blobs[i] = &sidecar.Blob
 	}
 	return blobs
-}
-
-type beaconBlobsResponse struct {
-	ExecutionOptimistic bool     `json:"execution_optimistic"`
-	Finalized           bool     `json:"finalized"`
-	Data                v1.Blobs `json:"data"`
 }
 
 func newBeaconBlobsResponse(metadata beaconResponseMetadata, data v1.Blobs) beaconBlobsResponse {

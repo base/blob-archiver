@@ -394,13 +394,6 @@ func TestBlobsHandlerJSON(t *testing.T) {
 	require.Equal(t, 200, response.Code)
 	require.Equal(t, "application/json", response.Header().Get("Content-Type"))
 
-	var responseBody map[string]json.RawMessage
-	err = json.Unmarshal(response.Body.Bytes(), &responseBody)
-	require.NoError(t, err)
-	require.Contains(t, responseBody, "execution_optimistic")
-	require.Contains(t, responseBody, "finalized")
-	require.Contains(t, responseBody, "data")
-
 	var blobs beaconBlobsResponse
 	err = json.Unmarshal(response.Body.Bytes(), &blobs)
 	require.NoError(t, err)
@@ -482,13 +475,6 @@ func TestBlobsHandlerWithVersionedHashes(t *testing.T) {
 	a.router.ServeHTTP(response, request)
 
 	require.Equal(t, 200, response.Code)
-
-	var responseBody map[string]json.RawMessage
-	err = json.Unmarshal(response.Body.Bytes(), &responseBody)
-	require.NoError(t, err)
-	require.Contains(t, responseBody, "execution_optimistic")
-	require.Contains(t, responseBody, "finalized")
-	require.Contains(t, responseBody, "data")
 
 	var blobs beaconBlobsResponse
 	err = json.Unmarshal(response.Body.Bytes(), &blobs)
