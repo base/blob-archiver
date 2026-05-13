@@ -394,13 +394,15 @@ func TestBlobsHandlerJSON(t *testing.T) {
 	require.Equal(t, 200, response.Code)
 	require.Equal(t, "application/json", response.Header().Get("Content-Type"))
 
-	var blobs v1.Blobs
+	var blobs beaconBlobsResponse
 	err = json.Unmarshal(response.Body.Bytes(), &blobs)
 	require.NoError(t, err)
-	require.Equal(t, len(testBlobs), len(blobs))
+	require.False(t, blobs.ExecutionOptimistic)
+	require.False(t, blobs.Finalized)
+	require.Equal(t, len(testBlobs), len(blobs.Data))
 
 	// Verify blob data matches
-	for i, blob := range blobs {
+	for i, blob := range blobs.Data {
 		require.Equal(t, testBlobs[i].Blob, *blob)
 	}
 }
@@ -474,10 +476,14 @@ func TestBlobsHandlerWithVersionedHashes(t *testing.T) {
 
 	require.Equal(t, 200, response.Code)
 
-	var blobs v1.Blobs
+	var blobs beaconBlobsResponse
 	err = json.Unmarshal(response.Body.Bytes(), &blobs)
 	require.NoError(t, err)
-	require.Equal(t, 2, len(blobs))
+	require.False(t, blobs.ExecutionOptimistic)
+	require.False(t, blobs.Finalized)
+	require.Equal(t, 2, len(blobs.Data))
+	require.Equal(t, testBlobs[0].Blob, *blobs.Data[0])
+	require.Equal(t, testBlobs[2].Blob, *blobs.Data[1])
 }
 
 func TestBlobsHandlerNotFound(t *testing.T) {

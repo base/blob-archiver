@@ -14,6 +14,7 @@ import (
 
 	client "github.com/attestantio/go-eth2-client"
 	"github.com/attestantio/go-eth2-client/api"
+	apimetadata "github.com/attestantio/go-eth2-client/api/metadata"
 	v1 "github.com/attestantio/go-eth2-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/deneb"
 	m "github.com/base/blob-archiver/api/metrics"
@@ -88,6 +89,28 @@ type API struct {
 	metrics         m.Metricer
 }
 
+type beaconResponseMetadata struct {
+	ExecutionOptimistic bool
+	Finalized           bool
+}
+
+type beaconBlockInfo struct {
+	Hash     common.Hash
+	Metadata beaconResponseMetadata
+}
+
+type beaconBlobSidecarsResponse struct {
+	ExecutionOptimistic bool                 `json:"execution_optimistic"`
+	Finalized           bool                 `json:"finalized"`
+	Data                []*deneb.BlobSidecar `json:"data"`
+}
+
+type beaconBlobsResponse struct {
+	ExecutionOptimistic bool     `json:"execution_optimistic"`
+	Finalized           bool     `json:"finalized"`
+	Data                v1.Blobs `json:"data"`
+}
+
 func NewAPI(dataStoreClient storage.DataStoreReader, beaconClient client.BeaconBlockHeadersProvider, metrics m.Metricer, logger log.Logger) *API {
 	result := &API{
 		dataStoreClient: dataStoreClient,
@@ -134,6 +157,18 @@ func isKnownIdentifier(id string) bool {
 	return slices.Contains([]string{"genesis", "finalized", "head"}, id)
 }
 
+func metadataBool(metadata map[string]any, key string) bool {
+	value, ok := metadata[key].(bool)
+	return ok && value
+}
+
+func responseMetadata(metadata map[string]any) beaconResponseMetadata {
+	return beaconResponseMetadata{
+		ExecutionOptimistic: metadataBool(metadata, apimetadata.ExecutionOptimistic),
+		Finalized:           metadataBool(metadata, apimetadata.Finalized),
+	}
+}
+
 // versionHandler implements the /eth/v1/node/version endpoint.
 func (a *API) versionHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", jsonAcceptType)
@@ -145,31 +180,63 @@ func (a *API) versionHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// toBeaconBlockHash converts a string that can be a slot, hash or identifier to a beacon block hash.
-func (a *API) toBeaconBlockHash(id string) (common.Hash, *httpError) {
-	if isHash(id) {
-		a.metrics.RecordBlockIdType(m.BlockIdTypeHash)
-		return common.HexToHash(id), nil
-	} else if isSlot(id) || isKnownIdentifier(id) {
-		a.metrics.RecordBlockIdType(m.BlockIdTypeBeacon)
-		result, err := a.beaconClient.BeaconBlockHeader(context.Background(), &api.BeaconBlockHeaderOpts{
-			Common: api.CommonOpts{},
-			Block:  id,
-		})
+func (a *API) beaconBlockHeader(ctx context.Context, id string) (*api.Response[*v1.BeaconBlockHeader], *httpError) {
+	result, err := a.beaconClient.BeaconBlockHeader(ctx, &api.BeaconBlockHeaderOpts{
+		Common: api.CommonOpts{},
+		Block:  id,
+	})
 
-		if err != nil {
-			var apiErr *api.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
-				return common.Hash{}, errUnknownBlock
-			}
-
-			return common.Hash{}, errServerError
+	if err != nil {
+		var apiErr *api.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+			return nil, errUnknownBlock
 		}
 
-		return common.Hash(result.Data.Root), nil
+		return nil, errServerError
+	}
+
+	return result, nil
+}
+
+// toBeaconBlockInfo converts a string that can be a slot, hash or identifier to a beacon block hash
+// and response metadata.
+func (a *API) toBeaconBlockInfo(ctx context.Context, id string) (beaconBlockInfo, *httpError) {
+	if isHash(id) {
+		a.metrics.RecordBlockIdType(m.BlockIdTypeHash)
+		blockInfo := beaconBlockInfo{
+			Hash: common.HexToHash(id),
+		}
+
+		result, err := a.beaconBlockHeader(ctx, id)
+		if err != nil {
+			a.logger.Debug("unable to fetch beacon metadata for block hash", "err", err, "id", id)
+			return blockInfo, nil
+		}
+
+		blockInfo.Metadata = responseMetadata(result.Metadata)
+		return blockInfo, nil
+	} else if isSlot(id) || isKnownIdentifier(id) {
+		a.metrics.RecordBlockIdType(m.BlockIdTypeBeacon)
+		result, err := a.beaconBlockHeader(ctx, id)
+		if err != nil {
+			return beaconBlockInfo{}, err
+		}
+
+		return beaconBlockInfo{
+			Hash:     common.Hash(result.Data.Root),
+			Metadata: responseMetadata(result.Metadata),
+		}, nil
 	} else {
 		a.metrics.RecordBlockIdType(m.BlockIdTypeInvalid)
-		return common.Hash{}, newBlockIdError(id)
+		return beaconBlockInfo{}, newBlockIdError(id)
+	}
+}
+
+func newBeaconBlobSidecarsResponse(metadata beaconResponseMetadata, data []*deneb.BlobSidecar) beaconBlobSidecarsResponse {
+	return beaconBlobSidecarsResponse{
+		ExecutionOptimistic: metadata.ExecutionOptimistic,
+		Finalized:           metadata.Finalized,
+		Data:                data,
 	}
 }
 
@@ -177,18 +244,18 @@ func (a *API) toBeaconBlockHash(id string) (common.Hash, *httpError) {
 // to fetch blobs instead of the beacon node. This allows clients to fetch expired blobs.
 func (a *API) blobSidecarHandler(w http.ResponseWriter, r *http.Request) {
 	param := chi.URLParam(r, "id")
-	beaconBlockHash, err := a.toBeaconBlockHash(param)
+	blockInfo, err := a.toBeaconBlockInfo(r.Context(), param)
 	if err != nil {
 		err.write(w)
 		return
 	}
 
-	result, storageErr := a.dataStoreClient.ReadBlob(r.Context(), beaconBlockHash)
+	result, storageErr := a.dataStoreClient.ReadBlob(r.Context(), blockInfo.Hash)
 	if storageErr != nil {
 		if errors.Is(storageErr, storage.ErrNotFound) {
 			errUnknownBlock.write(w)
 		} else {
-			a.logger.Info("unexpected error fetching blobs", "err", storageErr, "beaconBlockHash", beaconBlockHash.String(), "param", param)
+			a.logger.Info("unexpected error fetching blobs", "err", storageErr, "beaconBlockHash", blockInfo.Hash.String(), "param", param)
 			errServerError.write(w)
 		}
 		return
@@ -223,7 +290,7 @@ func (a *API) blobSidecarHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		w.Header().Set("Content-Type", jsonAcceptType)
-		err := json.NewEncoder(w).Encode(blobSidecars)
+		err := json.NewEncoder(w).Encode(newBeaconBlobSidecarsResponse(blockInfo.Metadata, blobSidecars.Data))
 		if err != nil {
 			a.logger.Error("unable to encode blob sidecars to JSON", "err", err)
 			errServerError.write(w)
@@ -316,23 +383,31 @@ func sidecarsToBlobs(sidecars []*deneb.BlobSidecar) v1.Blobs {
 	return blobs
 }
 
+func newBeaconBlobsResponse(metadata beaconResponseMetadata, data v1.Blobs) beaconBlobsResponse {
+	return beaconBlobsResponse{
+		ExecutionOptimistic: metadata.ExecutionOptimistic,
+		Finalized:           metadata.Finalized,
+		Data:                data,
+	}
+}
+
 // blobsHandler implements the /eth/v1/beacon/blobs/{id} endpoint, using the underlying DataStoreReader
 // to fetch blobs instead of the beacon node. This endpoint serves blobs without KZG proofs.
 // Filtering by versioned_hashes query parameter is supported (per EIP-4844).
 func (a *API) blobsHandler(w http.ResponseWriter, r *http.Request) {
 	param := chi.URLParam(r, "id")
-	beaconBlockHash, err := a.toBeaconBlockHash(param)
+	blockInfo, err := a.toBeaconBlockInfo(r.Context(), param)
 	if err != nil {
 		err.write(w)
 		return
 	}
 
-	result, storageErr := a.dataStoreClient.ReadBlob(r.Context(), beaconBlockHash)
+	result, storageErr := a.dataStoreClient.ReadBlob(r.Context(), blockInfo.Hash)
 	if storageErr != nil {
 		if errors.Is(storageErr, storage.ErrNotFound) {
 			errUnknownBlock.write(w)
 		} else {
-			a.logger.Info("unexpected error fetching blobs", "err", storageErr, "beaconBlockHash", beaconBlockHash.String(), "param", param)
+			a.logger.Info("unexpected error fetching blobs", "err", storageErr, "beaconBlockHash", blockInfo.Hash.String(), "param", param)
 			errServerError.write(w)
 		}
 		return
@@ -369,7 +444,7 @@ func (a *API) blobsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		w.Header().Set("Content-Type", jsonAcceptType)
-		err := json.NewEncoder(w).Encode(blobs)
+		err := json.NewEncoder(w).Encode(newBeaconBlobsResponse(blockInfo.Metadata, blobs))
 		if err != nil {
 			a.logger.Error("unable to encode blobs to JSON", "err", err)
 			errServerError.write(w)
