@@ -26,13 +26,14 @@ func NewService(l log.Logger, cfg flags.ArchiverConfig, api *API, archiver *Arch
 }
 
 type ArchiverService struct {
-	stopped       atomic.Bool
-	log           log.Logger
-	metricsServer *httputil.HTTPServer
-	cfg           flags.ArchiverConfig
-	metrics       metrics.Metricer
-	api           *API
-	archiver      *Archiver
+    stopped       atomic.Bool
+    log           log.Logger
+    metricsServer *httputil.HTTPServer
+    apiServer     *httputil.HTTPServer
+    cfg           flags.ArchiverConfig
+    metrics       metrics.Metricer
+    api           *API
+    archiver      *Archiver
 }
 
 // Start starts the archiver service. It'll start the API's as well as the archiving process.
@@ -49,13 +50,14 @@ func (a *ArchiverService) Start(ctx context.Context) error {
 	}
 
 	srv, err := httputil.StartHTTPServer(a.cfg.ListenAddr, a.api.router)
-	if err != nil {
-		return fmt.Errorf("failed to start Archiver API server: %w", err)
-	}
+if err != nil {
+	return fmt.Errorf("failed to start Archiver API server: %w", err)
+}
 
-	a.log.Info("Archiver API server started", "address", srv.Addr().String())
+a.log.Info("Archiver API server started", "address", srv.Addr().String())
+a.apiServer = srv
 
-	return a.archiver.Start(ctx)
+return a.archiver.Start(ctx)
 }
 
 // Stops the archiver service.
@@ -66,13 +68,19 @@ func (a *ArchiverService) Stop(ctx context.Context) error {
 	a.log.Info("Stopping Archiver")
 	a.stopped.Store(true)
 
-	if a.metricsServer != nil {
-		if err := a.metricsServer.Stop(ctx); err != nil {
-			return err
-		}
+	if a.apiServer != nil {
+	if err := a.apiServer.Shutdown(ctx); err != nil {
+		return err
 	}
+}
 
-	return a.archiver.Stop(ctx)
+if a.metricsServer != nil {
+	if err := a.metricsServer.Stop(ctx); err != nil {
+		return err
+	}
+}
+
+return a.archiver.Stop(ctx)
 }
 
 func (a *ArchiverService) Stopped() bool {
