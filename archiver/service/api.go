@@ -97,7 +97,7 @@ func (a *API) rearchiveBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	blockStart, blockEnd, err := a.archiver.rearchiveRange(from, to)
+	blockStart, blockEnd, err := a.archiver.rearchiveRange(r.Context(), from, to)
 	if err != nil {
 		a.logger.Error("Failed to rearchive blocks", "err", err)
 
