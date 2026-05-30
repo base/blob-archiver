@@ -29,6 +29,7 @@ type ArchiverService struct {
 	stopped       atomic.Bool
 	log           log.Logger
 	metricsServer *httputil.HTTPServer
+	apiServer     *httputil.HTTPServer
 	cfg           flags.ArchiverConfig
 	metrics       metrics.Metricer
 	api           *API
@@ -53,6 +54,7 @@ func (a *ArchiverService) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start Archiver API server: %w", err)
 	}
 
+	a.apiServer = srv
 	a.log.Info("Archiver API server started", "address", srv.Addr().String())
 
 	return a.archiver.Start(ctx)
@@ -65,6 +67,12 @@ func (a *ArchiverService) Stop(ctx context.Context) error {
 	}
 	a.log.Info("Stopping Archiver")
 	a.stopped.Store(true)
+
+	if a.apiServer != nil {
+		if err := a.apiServer.Stop(ctx); err != nil {
+			return err
+		}
+	}
 
 	if a.metricsServer != nil {
 		if err := a.metricsServer.Stop(ctx); err != nil {
