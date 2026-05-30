@@ -241,7 +241,7 @@ func (a *Archiver) waitObtainStorageLock(ctx context.Context) {
 
 	err = a.dataStoreClient.WriteLockfile(ctx, storage.Lockfile{ArchiverId: a.id, Timestamp: currentTime})
 	if err != nil {
-		a.log.Crit("failed to write to lockfile: %v", err)
+		a.log.Crit("failed to write to lockfile", "err", err)
 	}
 	a.log.Info("obtained storage lock")
 
