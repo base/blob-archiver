@@ -52,9 +52,9 @@ docker compose up
 You can see a full list of configuration options by running:
 ```sh
 # API
-go run api/cmd/main.go
+go run api/cmd/main.go --help
 
 # Archiver
-go run archiver/cmd/main.go
+go run archiver/cmd/main.go --help
 
 ```
