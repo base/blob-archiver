@@ -5,6 +5,7 @@ of two components:
 * **Archiver** - Tracks the beacon chain and writes blobs to a storage backend
 * **API** - Implements the blob sidecars [API](https://ethereum.github.io/beacon-APIs/#/Beacon/getBlobSidecars), which 
 allows clients to retrieve blobs from the storage backend
+* **Validator** - A job that checks the validity of blobs by comparing the Blob API output against a L1 beacon node
 
 ### Storage
 There are currently two supported storage options:
@@ -52,9 +53,11 @@ docker compose up
 You can see a full list of configuration options by running:
 ```sh
 # API
-go run api/cmd/main.go
+go run api/cmd/main.go --help
 
 # Archiver
-go run archiver/cmd/main.go
+go run archiver/cmd/main.go --help
 
+# Validator
+go run validator/cmd/main.go --help
 ```
