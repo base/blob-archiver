@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
@@ -112,4 +113,14 @@ func TestReadInvalidData(t *testing.T) {
 	_, err = fs.ReadBlob(context.Background(), id)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrMarshaling))
+}
+
+func TestNewFileStorageCreatesDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "blob-data")
+
+	_ = NewFileStorage(dir, log.New())
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("expected storage directory to exist: %v", err)
+	}
 }

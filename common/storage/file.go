@@ -17,6 +17,10 @@ type FileStorage struct {
 }
 
 func NewFileStorage(dir string, l log.Logger) *FileStorage {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		l.Crit("failed to create file storage directory", "err", err)
+	}
+
 	storage := &FileStorage{
 		log:       l,
 		directory: dir,
