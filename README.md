@@ -1,3 +1,7 @@
+> [!CAUTION]
+> # This repository is archived
+> This repository is no longer maintained.
+
 # Blob Archiver
 The Blob Archiver is a service to archive and allow querying of all historical blobs from the beacon chain. It consists 
 of two components:
