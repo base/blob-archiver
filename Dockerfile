@@ -12,7 +12,7 @@ COPY . /app
 
 RUN make build
 
-FROM alpine:3.19
+FROM alpine:3.21
 
 COPY --from=builder /app/archiver/bin/blob-archiver /usr/local/bin/blob-archiver
 COPY --from=builder /app/api/bin/blob-api /usr/local/bin/blob-api
