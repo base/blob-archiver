@@ -241,7 +241,7 @@ func (a *Archiver) waitObtainStorageLock(ctx context.Context) {
 
 	err = a.dataStoreClient.WriteLockfile(ctx, storage.Lockfile{ArchiverId: a.id, Timestamp: currentTime})
 	if err != nil {
-		a.log.Crit("failed to write to lockfile: %v", err)
+		a.log.Crit("failed to write to lockfile", "err", err)
 	}
 	a.log.Info("obtained storage lock")
 
@@ -387,7 +387,7 @@ func (a *Archiver) processBlocksUntilKnownBlock(ctx context.Context) {
 // rearchiveRange will rearchive all blocks in the range from the given start to end. It returns the start and end of the
 // range that was successfully rearchived. On any persistent errors, it will halt archiving and return the range of blocks
 // that were rearchived and the error that halted the process.
-func (a *Archiver) rearchiveRange(from uint64, to uint64) (uint64, uint64, error) {
+func (a *Archiver) rearchiveRange(ctx context.Context, from uint64, to uint64) (uint64, uint64, error) {
 	for i := from; i <= to; i++ {
 		id := strconv.FormatUint(i, 10)
 
@@ -395,8 +395,8 @@ func (a *Archiver) rearchiveRange(from uint64, to uint64) (uint64, uint64, error
 
 		l.Info("rearchiving block")
 
-		rewritten, err := retry.Do(context.Background(), rearchiveMaximumRetries, retry.Exponential(), func() (bool, error) {
-			_, _, e := a.persistBlobsForBlockToS3(context.Background(), id, true)
+		rewritten, err := retry.Do(ctx, rearchiveMaximumRetries, retry.Exponential(), func() (bool, error) {
+			_, _, e := a.persistBlobsForBlockToS3(ctx, id, true)
 
 			// If the block is not found, we can assume that the slot has been skipped
 			if e != nil {

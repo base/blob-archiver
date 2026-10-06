@@ -459,7 +459,7 @@ func TestArchiver_RearchiveRange(t *testing.T) {
 
 	from, to := blobtest.StartSlot+1, blobtest.StartSlot+4
 
-	actualFrom, actualTo, err := svc.rearchiveRange(from, to)
+	actualFrom, actualTo, err := svc.rearchiveRange(context.Background(), from, to)
 	// Should index the whole range
 	require.NoError(t, err)
 	require.Equal(t, from, actualFrom)
