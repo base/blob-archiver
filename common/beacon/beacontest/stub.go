@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/attestantio/go-eth2-client/api"
@@ -18,6 +19,38 @@ type StubBeaconClient struct {
 	Headers         map[string]*v1.BeaconBlockHeader
 	SidecarsByBlock map[string][]*deneb.BlobSidecar
 	FailSidecars    bool
+	// UnavailableBlobs lists blocks whose blob data the beacon node does not serve yet (e.g. a late-imported block
+	// whose data columns have not arrived). Both blob endpoints fail for these blocks, mirroring Lighthouse. Use
+	// SetBlobsAvailable to simulate the columns arriving while the archiver is running.
+	UnavailableBlobs map[string]bool
+	unavailableMu    sync.RWMutex
+}
+
+func (s *StubBeaconClient) blobsUnavailable(block string) bool {
+	s.unavailableMu.RLock()
+	defer s.unavailableMu.RUnlock()
+
+	return s.UnavailableBlobs[block]
+}
+
+// SetBlobsAvailable marks a block's blob data as served by the beacon node again.
+func (s *StubBeaconClient) SetBlobsAvailable(block string) {
+	s.unavailableMu.Lock()
+	defer s.unavailableMu.Unlock()
+
+	delete(s.UnavailableBlobs, block)
+}
+
+// NewBlobsUnavailableError returns the error a Lighthouse beacon node produces for /eth/v1/beacon/blobs when it
+// holds no data columns for the requested block.
+func NewBlobsUnavailableError() error {
+	return &api.Error{
+		Method:     "GET",
+		Endpoint:   "/eth/v1/beacon/blobs",
+		StatusCode: 400,
+		Data: []byte(`{"code":400,"message":"BAD_REQUEST: Insufficient data columns to reconstruct blobs: ` +
+			`required 64, but only 0 were found. You may need to run the beacon node with --supernode or --semi-supernode.","stacktraces":[]}`),
+	}
 }
 
 func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.BeaconBlockHeaderOpts) (*api.Response[*v1.BeaconBlockHeader], error) {
@@ -31,7 +64,7 @@ func (s *StubBeaconClient) BeaconBlockHeader(ctx context.Context, opts *api.Beac
 }
 
 func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidecarsOpts) (*api.Response[[]*deneb.BlobSidecar], error) {
-	if s.FailSidecars {
+	if s.FailSidecars || s.blobsUnavailable(opts.Block) {
 		return nil, fmt.Errorf("blob sidecars endpoint unavailable")
 	}
 
@@ -46,6 +79,10 @@ func (s *StubBeaconClient) BlobSidecars(ctx context.Context, opts *api.BlobSidec
 
 // Blobs implements the BlobsProvider interface, converting sidecars to blobs
 func (s *StubBeaconClient) Blobs(ctx context.Context, opts *api.BlobsOpts) (*api.Response[v1.Blobs], error) {
+	if s.blobsUnavailable(opts.Block) {
+		return nil, NewBlobsUnavailableError()
+	}
+
 	sidecars, found := s.SidecarsByBlock[opts.Block]
 	if !found {
 		return nil, fmt.Errorf("block not found")

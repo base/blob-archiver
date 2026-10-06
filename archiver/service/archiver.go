@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	client "github.com/attestantio/go-eth2-client"
@@ -26,6 +29,47 @@ const (
 	rearchiveMaximumRetries        = 3
 	backfillErrorRetryInterval     = 5 * time.Second
 )
+
+// Backoff applied while the beacon node reports a block's blobs as unavailable (see blobsUnavailableError). Data
+// columns for a late-imported block typically arrive within a few minutes, so the archiver waits for them in place
+// rather than skipping the block, which would risk never archiving it.
+var (
+	unavailableBlobsInitialBackoff = 10 * time.Second
+	unavailableBlobsMaxBackoff     = 5 * time.Minute
+)
+
+// blobsUnavailableError is returned when the beacon node knows the block but does not (yet) hold its blob data.
+//
+// Post-Fulu, blobs are reconstructed from data columns. A block that reaches the node late (for example via req/resp
+// during a fork-choice flip rather than via gossip in-slot) can sit for minutes with no columns before they arrive.
+// During that window Lighthouse answers /eth/v1/beacon/blobs with a 400 reporting zero data columns found (and a
+// misleading hint to run as a supernode). The block is canonical and does have blobs, so callers must not record it
+// as blob-less or skip it; they should wait and try again (see persistBlobsWhenAvailable).
+type blobsUnavailableError struct {
+	header *v1.BeaconBlockHeader
+	err    error
+}
+
+func (e *blobsUnavailableError) Error() string {
+	return fmt.Sprintf("blobs unavailable for block %s: %v", e.header.Root.String(), e.err)
+}
+
+func (e *blobsUnavailableError) Unwrap() error {
+	return e.err
+}
+
+// isBlobsUnavailableResponse reports whether err is a beacon node response indicating that no blob data exists
+// for the block, as opposed to a transient or custody-related failure.
+func isBlobsUnavailableResponse(err error) bool {
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+
+	msg := string(apiErr.Data)
+
+	return strings.Contains(msg, "Insufficient data columns") && strings.Contains(msg, "only 0 were found")
+}
 
 // blobsToSidecars converts blobs to blob sidecars by computing KZG commitments and proofs from the blob data.
 // The blobs and commitments are ordered identically (by KZG commitment order in the block).
@@ -97,10 +141,7 @@ type Archiver struct {
 // to the previously stored blocks. This ensures that during restarts or outages of an archiver, any gaps will be
 // filled in.
 func (a *Archiver) Start(ctx context.Context) error {
-	currentBlock, _, err := retry.Do2(ctx, startupFetchBlobMaximumRetries, retry.Exponential(), func() (*v1.BeaconBlockHeader, bool, error) {
-		return a.persistBlobsForBlockToS3(ctx, "head", false)
-	})
-
+	currentBlock, err := a.seedInitialBlock(ctx)
 	if err != nil {
 		a.log.Error("failed to seed archiver with initial block", "err", err)
 		return err
@@ -111,6 +152,17 @@ func (a *Archiver) Start(ctx context.Context) error {
 	go a.backfillBlobs(ctx, currentBlock)
 
 	return a.trackLatestBlocks(ctx)
+}
+
+// seedInitialBlock archives the current head and returns its header, which anchors the backfill process. The head is
+// the block most likely to still be missing data columns on the beacon node; in that case startup waits for them
+// rather than failing.
+func (a *Archiver) seedInitialBlock(ctx context.Context) (*v1.BeaconBlockHeader, error) {
+	currentBlock, _, err := retry.Do2(ctx, startupFetchBlobMaximumRetries, retry.Exponential(), func() (*v1.BeaconBlockHeader, bool, error) {
+		return a.persistBlobsWhenAvailable(ctx, "head", false)
+	})
+
+	return currentBlock, err
 }
 
 // Stops the archiver service.
@@ -170,6 +222,11 @@ func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier
 		})
 
 		if fallbackErr != nil {
+			if isBlobsUnavailableResponse(fallbackErr) {
+				a.log.Debug("beacon node reports no blob data for block", "err", fallbackErr, "hash", currentHeader.Data.Root.String())
+				return nil, false, &blobsUnavailableError{header: currentHeader.Data, err: fallbackErr}
+			}
+
 			a.log.Error("failed to fetch blobs", "err", fallbackErr)
 			return nil, false, fallbackErr
 		}
@@ -209,6 +266,38 @@ func (a *Archiver) persistBlobsForBlockToS3(ctx context.Context, blockIdentifier
 	a.metrics.RecordStoredBlobs(len(blobSidecarData))
 
 	return currentHeader.Data, exists, nil
+}
+
+// persistBlobsWhenAvailable wraps persistBlobsForBlockToS3 and, while the beacon node reports the block's blobs as
+// unavailable, waits with exponential backoff (capped at unavailableBlobsMaxBackoff) and tries again. It only
+// returns once the block is archived, the error is of another kind, or the archiver is stopped.
+func (a *Archiver) persistBlobsWhenAvailable(ctx context.Context, blockIdentifier string, overwrite bool) (*v1.BeaconBlockHeader, bool, error) {
+	backoff := unavailableBlobsInitialBackoff
+
+	for {
+		header, alreadyExists, err := a.persistBlobsForBlockToS3(ctx, blockIdentifier, overwrite)
+
+		var unavailable *blobsUnavailableError
+		if !errors.As(err, &unavailable) {
+			return header, alreadyExists, err
+		}
+
+		a.log.Warn("beacon node has no blob data for block yet, waiting",
+			"hash", unavailable.header.Root.String(),
+			"slot", unavailable.header.Header.Message.Slot,
+			"retryIn", backoff,
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-a.stopCh:
+			return nil, false, errors.New("archiver stopped while waiting for blobs")
+		case <-time.After(backoff):
+		}
+
+		backoff = min(backoff*2, unavailableBlobsMaxBackoff)
+	}
 }
 
 const LockUpdateInterval = 10 * time.Second
@@ -305,7 +394,7 @@ func (a *Archiver) backfillBlobs(ctx context.Context, latest *v1.BeaconBlockHead
 				return
 			}
 
-			curr, alreadyExists, err = a.persistBlobsForBlockToS3(ctx, previous.Header.Message.ParentRoot.String(), false)
+			curr, alreadyExists, err = a.persistBlobsWhenAvailable(ctx, previous.Header.Message.ParentRoot.String(), false)
 			if err != nil {
 				a.log.Error("failed to persist blobs for block, will retry", "err", err, "hash", previous.Header.Message.ParentRoot.String())
 				// Revert back to block we failed to fetch
@@ -359,7 +448,7 @@ func (a *Archiver) processBlocksUntilKnownBlock(ctx context.Context) {
 
 	for {
 		current, alreadyExisted, err := retry.Do2(ctx, liveFetchBlobMaximumRetries, retry.Exponential(), func() (*v1.BeaconBlockHeader, bool, error) {
-			return a.persistBlobsForBlockToS3(ctx, currentBlockId, false)
+			return a.persistBlobsWhenAvailable(ctx, currentBlockId, false)
 		})
 
 		if err != nil {

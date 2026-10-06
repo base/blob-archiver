@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/attestantio/go-eth2-client/api"
 	"github.com/base/blob-archiver/archiver/flags"
 	"github.com/base/blob-archiver/archiver/metrics"
 	"github.com/base/blob-archiver/common/beacon/beacontest"
@@ -517,4 +520,161 @@ func TestArchiver_FetchBlobs_FallbackToBlobs(t *testing.T) {
 		// The blob data should match
 		require.Equal(t, originalSidecar.Blob, storedSidecar.Blob)
 	}
+}
+
+func TestIsBlobsUnavailableResponse(t *testing.T) {
+	lighthouseNoColumns := beacontest.NewBlobsUnavailableError()
+
+	require.True(t, isBlobsUnavailableResponse(lighthouseNoColumns))
+	require.True(t, isBlobsUnavailableResponse(fmt.Errorf("operation failed permanently after 10 attempts: %w", lighthouseNoColumns)))
+
+	// A custody shortfall on a block that does have blobs is not "unavailable"
+	require.False(t, isBlobsUnavailableResponse(&api.Error{
+		StatusCode: 400,
+		Data:       []byte(`{"code":400,"message":"BAD_REQUEST: Insufficient data columns to reconstruct blobs: required 64, but only 63 were found."}`),
+	}))
+	require.False(t, isBlobsUnavailableResponse(&api.Error{StatusCode: 404, Data: []byte(`{"code":404,"message":"NOT_FOUND"}`)}))
+	require.False(t, isBlobsUnavailableResponse(errors.New("connection refused")))
+	require.False(t, isBlobsUnavailableResponse(nil))
+}
+
+func TestArchiver_FetchBlobs_Unavailable(t *testing.T) {
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	beacon.UnavailableBlobs = map[string]bool{blobtest.Two.String(): true}
+	svc, fs := setup(t, beacon)
+
+	header, alreadyExists, err := svc.persistBlobsForBlockToS3(context.Background(), blobtest.Two.String(), false)
+	require.Nil(t, header)
+	require.False(t, alreadyExists)
+
+	var unavailable *blobsUnavailableError
+	require.ErrorAs(t, err, &unavailable)
+	require.Equal(t, beacon.Headers[blobtest.Two.String()], unavailable.header)
+
+	// Nothing is written on the first failure; callers decide when to store an empty blob set
+	fs.CheckNotExistsOrFail(t, blobtest.Two)
+}
+
+// shortUnavailableBackoff shrinks the wait applied while blobs are unavailable so tests run quickly.
+func shortUnavailableBackoff(t *testing.T) {
+	initial, maximum := unavailableBlobsInitialBackoff, unavailableBlobsMaxBackoff
+	unavailableBlobsInitialBackoff, unavailableBlobsMaxBackoff = 10*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { unavailableBlobsInitialBackoff, unavailableBlobsMaxBackoff = initial, maximum })
+}
+
+// makeAvailableAfter simulates the beacon node receiving the block's data columns after a delay.
+func makeAvailableAfter(beacon *beacontest.StubBeaconClient, block string, d time.Duration) {
+	go func() {
+		time.Sleep(d)
+		beacon.SetBlobsAvailable(block)
+	}()
+}
+
+func TestArchiver_LatestWaitsForUnavailableBlock(t *testing.T) {
+	shortUnavailableBackoff(t)
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	// Four's data columns have not reached the beacon node yet
+	beacon.UnavailableBlobs = map[string]bool{blobtest.Four.String(): true}
+	svc, fs := setup(t, beacon)
+
+	// 5 is the current head, three already exists, so we should write 5 and 4 and stop at three
+	fs.WriteOrFail(t, storage.BlobData{
+		Header: storage.Header{
+			BeaconBlockHash: blobtest.Three,
+		},
+		BlobSidecars: storage.BlobSidecars{
+			Data: beacon.SidecarsByBlock[blobtest.Three.String()],
+		},
+	})
+
+	fs.CheckNotExistsOrFail(t, blobtest.Five)
+	fs.CheckNotExistsOrFail(t, blobtest.Four)
+
+	makeAvailableAfter(beacon, blobtest.Four.String(), 200*time.Millisecond)
+	svc.processBlocksUntilKnownBlock(context.Background())
+
+	// Four was archived once the columns arrived, nothing was skipped and the pass completed
+	fs.CheckExistsOrFail(t, blobtest.Five)
+	fs.CheckExistsOrFail(t, blobtest.Four)
+	fs.CheckExistsOrFail(t, blobtest.Three)
+	require.Len(t, fs.ReadOrFail(t, blobtest.Four).BlobSidecars.Data, len(beacon.SidecarsByBlock[blobtest.Four.String()]))
+}
+
+func TestArchiver_BackfillWaitsForUnavailableBlock(t *testing.T) {
+	shortUnavailableBackoff(t)
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	// Two's data columns have not reached the beacon node yet
+	beacon.UnavailableBlobs = map[string]bool{blobtest.Two.String(): true}
+	svc, fs := setup(t, beacon)
+
+	fs.WriteOrFail(t, storage.BlobData{
+		Header: storage.Header{
+			BeaconBlockHash: blobtest.Five,
+		},
+		BlobSidecars: storage.BlobSidecars{
+			Data: beacon.SidecarsByBlock[blobtest.Five.String()],
+		},
+	})
+
+	fs.CheckNotExistsOrFail(t, blobtest.Two)
+	fs.CheckNotExistsOrFail(t, blobtest.One)
+	fs.CheckNotExistsOrFail(t, blobtest.OriginBlock)
+
+	makeAvailableAfter(beacon, blobtest.Two.String(), 200*time.Millisecond)
+	svc.backfillBlobs(context.Background(), beacon.Headers[blobtest.Five.String()])
+
+	fs.CheckExistsOrFail(t, blobtest.Four)
+	fs.CheckExistsOrFail(t, blobtest.Three)
+	fs.CheckExistsOrFail(t, blobtest.Two)
+	fs.CheckExistsOrFail(t, blobtest.One)
+	fs.CheckExistsOrFail(t, blobtest.OriginBlock)
+	require.Len(t, fs.ReadOrFail(t, blobtest.Two).BlobSidecars.Data, len(beacon.SidecarsByBlock[blobtest.Two.String()]))
+}
+
+func TestArchiver_SeedWaitsForUnavailableHead(t *testing.T) {
+	shortUnavailableBackoff(t)
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	// head (Five) has just been imported and its data columns have not arrived yet
+	beacon.UnavailableBlobs = map[string]bool{"head": true}
+	svc, fs := setup(t, beacon)
+
+	makeAvailableAfter(beacon, "head", 200*time.Millisecond)
+	header, err := svc.seedInitialBlock(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, beacon.Headers["head"], header)
+	fs.CheckExistsOrFail(t, blobtest.Five)
+}
+
+func TestArchiver_SeedFailsOnOtherErrors(t *testing.T) {
+	beacon := beacontest.NewEmptyStubBeaconClient()
+	svc, _ := setup(t, beacon)
+
+	// No headers at all: the beacon node is unusable and startup must still fail
+	_, err := svc.seedInitialBlock(context.Background())
+	require.Error(t, err)
+}
+
+func TestArchiver_WaitForBlobsStopsWithArchiver(t *testing.T) {
+	shortUnavailableBackoff(t)
+	beacon := beacontest.NewDefaultStubBeaconClient(t)
+	beacon.UnavailableBlobs = map[string]bool{blobtest.Two.String(): true}
+	svc, fs := setup(t, beacon)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := svc.persistBlobsWhenAvailable(context.Background(), blobtest.Two.String(), false)
+		done <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, svc.Stop(context.Background()))
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("persistBlobsWhenAvailable did not return after Stop")
+	}
+
+	fs.CheckNotExistsOrFail(t, blobtest.Two)
 }
