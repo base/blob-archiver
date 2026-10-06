@@ -73,8 +73,19 @@ func (a *ValidatorService) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to get beacon block header: %w", err)
 	}
 
-	end := header.Data.Header.Message.Slot - finalizedL1Offset
-	start := end - phase0.Slot(a.cfg.NumBlocks)
+	headSlot := header.Data.Header.Message.Slot
+	if headSlot < finalizedL1Offset {
+		return fmt.Errorf("beacon head slot %d is below finalizedL1Offset %d, cannot compute end slot", headSlot, finalizedL1Offset)
+	}
+	end := headSlot - finalizedL1Offset
+
+	numBlocks := phase0.Slot(a.cfg.NumBlocks)
+	var start phase0.Slot
+	if end < numBlocks {
+		start = 0
+	} else {
+		start = end - numBlocks
+	}
 
 	go a.checkBlobs(ctx, start, end)
 
