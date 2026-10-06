@@ -49,6 +49,21 @@ func TestExists(t *testing.T) {
 	runTestExists(t, fs)
 }
 
+func TestNewFileStorageCreatesDirectory(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	tempDir := t.TempDir()
+	storageDir := tempDir + "/nested/storage"
+
+	fs := NewFileStorage(storageDir, logger)
+
+	_, err := os.Stat(storageDir)
+	require.NoError(t, err)
+	_, err = fs.ReadBackfillProcesses(context.Background())
+	require.NoError(t, err)
+	_, err = fs.ReadLockfile(context.Background())
+	require.NoError(t, err)
+}
+
 func runTestRead(t *testing.T, s DataStore) {
 	id := common.Hash{1, 2, 3}
 
